@@ -286,7 +286,8 @@ actor Renderer {
         let rotationAxis = SIMD3<Float>(1, 1, 0)
         let modelRotationMatrix = matrix4x4_rotation(radians: rotation, axis: rotationAxis)
         let modelTranslationMatrix = matrix4x4_translation(0.0, 0.0, -8.0)
-        let modelMatrix = modelTranslationMatrix * modelRotationMatrix
+//        let modelMatrix = modelTranslationMatrix * modelRotationMatrix
+        let modelMatrix = modelTranslationMatrix
 
         let simdDeviceAnchor = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
 
