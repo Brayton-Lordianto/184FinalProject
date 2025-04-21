@@ -24,22 +24,25 @@ typedef struct
     float2 texCoord;
 } ColorInOut;
 
-typedef struct
+// Ray Tracing
+#define NUM_MONTE_CARLO_SAMPLES 1
+typedef struct RayHit
 {
-    bool hit;
+    bool hit = false;
     float dist;
     float3 normal;
+    float3 albedo = 0; // for diffuse surfaces
+    float3 emission = 0; // for light sources
 } RayHit;
 
-
-
 // spheres/quad/plane
-#define NUM_SPHERES 2
-#define NUM_QUADS 1
-#define NUM_TRIANGLES 1
+#define SUPER_FAR 1000000.0
+#define NUM_SPHERES 1
+#define NUM_QUADS 14
+#define NUM_TRIANGLES 2
 typedef struct { float3 c; float r; half3 color; } Sphere;
 typedef struct { float3 p0, p1, p2, p3; half3 color; } Quad;
-typedef struct { float3 p1, p2, p3; half3 color; } Triangle;
+typedef struct Triangle { float3 p1, p2, p3; half3 color; bool isLightSource=false; } Triangle;
 typedef struct
 {
     Sphere spheres[NUM_SPHERES];
@@ -62,6 +65,39 @@ vertex ColorInOut vertexShader(Vertex in [[stage_in]],
     return out;
 }
 
+// MARK: RNG :- taken online
+// Wang hash function for random number generation
+uint wang_hash(uint seed)
+{
+    seed = uint(seed ^ uint(61)) ^ uint(seed >> uint(16));
+    seed *= uint(9);
+    seed = seed ^ (seed >> 4);
+    seed *= uint(0x27d4eb2d);
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+
+// Generate a random float between 0 and 1
+float RandomFloat01(thread uint& state)
+{
+    state = wang_hash(state);
+    return float(state) / 4294967296.0;
+}
+
+// Generate a random unit vector (for directions)
+float3 RandomUnitVector(thread uint& state)
+{
+    float z = RandomFloat01(state) * 2.0f - 1.0f;
+    float a = RandomFloat01(state) * 2.0f * M_PI_F;
+    float r = sqrt(1.0f - z * z);
+    float x = r * cos(a);
+    float y = r * sin(a);
+    return float3(x, y, z);
+}
+// MARK: END
+
+
+// MARK: Basic Object Ray Tracing Equations
 RayHit raySphereIntersect(float3 rayOrigin, float3 rayDirection, Sphere sphere)
 {
     RayHit hit;
@@ -109,7 +145,8 @@ RayHit rayTriangleIntersect(float3 rayOrigin, float3 rayDirection, Triangle tria
     // update the hit
     hit.hit = true;
     hit.normal = normalize(cross(e1, e2));
-    hit.dist = t;
+    hit.dist = -t;
+    hit.emission = (triangle.isLightSource) ? float3(triangle.color) : float3(0);
     return hit;
 }
 
@@ -142,19 +179,17 @@ RayHit rayQuadIntersect(float3 rayOrigin, float3 rayDirection, Quad quad)
     noHit.hit = false;
     return noHit;
 }
+// MARK: END
 
 
-float3 rayTrace(float3 rayPosition, float3 rayDirection, Scene scene)
+RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene)
 {
-    // Ray tracing logic here
-    // Initialize hit info with a very far distance
     RayHit closestHit;
     closestHit.hit = false;
-    closestHit.dist = 1000000.0; // A very large number (equivalent to c_superFar in the reference)
+    closestHit.dist = SUPER_FAR; // A very large number (equivalent to c_superFar in the reference)
+    float3 color = float3(0.5 + 0.5 * rayDirection.y, 0.7, 0.9 + 0.1 * rayDirection.y); // background
     
-    float3 color = float3(0.0, 0.0, 0.0); // Default background color
-    
-    //     Check intersections with all spheres
+    // Check intersections with all spheres
     for (int i = 0; i < NUM_SPHERES; i++)
     {
         Sphere sphere = scene.spheres[i];
@@ -199,39 +234,93 @@ float3 rayTrace(float3 rayPosition, float3 rayDirection, Scene scene)
         }
     }
     
-    // If we didn't hit anything, return the background color
-    if (!closestHit.hit)
-    {
-        // You could implement a background gradient or skybox here
-        // For now, let's return a simple gradient based on ray direction
-        return float3(0.5 + 0.5 * rayDirection.y, 0.7, 0.9 + 0.1 * rayDirection.y);
-    }
-    
-    // Add some basic lighting
-    float3 lightDir = normalize(float3(1.0, 1.0, -1.0));
-    float diffuse = max(0.0, dot(closestHit.normal, -lightDir));
-    float ambient = 0.2;
-    
-    return color * (ambient + diffuse);
+    closestHit.albedo = color;
+    return closestHit;
+}
 
+float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint& rng)
+{
+    float3 ret = float3(0);
+    float3 irradiance = float3(1);
+    float3 rayPos = rayOrigin;
+    float3 rayDir = rayDirection;
+    
+    int c_numBounces = 3;
+    int c_rayPosNormalNudge = 0.001;
+    for (int bounce = 0; bounce <= c_numBounces; ++bounce)
+    {
+        // Use the current ray position and direction
+        RayHit hit = rayTraceHit(rayPos, rayDir, scene);
+        if (!hit.hit || hit.dist >= SUPER_FAR) {
+            // Add background contribution and break
+            float3 backgroundColor = float3(0.5 + 0.5 * rayDir.y, 0.7, 0.9 + 0.1 * rayDir.y);
+            ret += backgroundColor * irradiance;
+            break;
+        }
+        // Compute the intersection point and update the ray
+        float3 hitPoint = rayPos + rayDir * hit.dist;
+        // Add emission contribution
+        ret += hit.emission * irradiance;
+        // Update for next bounce
+        rayPos = hitPoint + hit.normal * c_rayPosNormalNudge; // Nudge to avoid self-intersection with the point you just intersected with.
+        rayDir = normalize(hit.normal + RandomUnitVector(rng));
+        // Update the throughput for next bounce
+        irradiance *= hit.albedo;
+    }
+    return ret;
 }
 
 fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                texture2d<half> colorMap     [[ texture(TextureIndexColor) ]])
 {
+//    Scene scene;
+//    scene = {
+//        .spheres = {
+//            { float3(0, 0, -5), 1.0, half3(0, 0, 1) },
+//            { float3(2, 0, -5), 1.0, half3(0, 1, 0) }
+//        },
+//        .quads = {
+//            { float3(-2, -2, -5), float3(2, -2, -5), float3(2, 2, -5), float3(-2, 2, -5), half3(1, 0, 0) }
+//        },
+//        .triangles = { // more negative means closer to you.
+//            { float3(2, 0, -6), float3(0, 0, -6), float3(0, 1, -6), half3(1, 1, 0) }
+//        }
+//    };
+    
+    // simple cornell box. 
     Scene scene = {
         .spheres = {
-            { float3(0, 0, -5), 1.0, half3(1, 0, 0) },
-            { float3(2, 0, -5), 1.0, half3(0, 1, 0) }
         },
         .quads = {
-            { float3(-2, -2, -5), float3(2, -2, -5), float3(2, 2, -5), float3(-2, 2, -5), half3(1, 0, 0) }
+            // Room walls, floor, ceiling
+            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8) },  // Back wall (blue)
+            { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2) },  // Left wall (red)
+            { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2) },  // Right wall (green)
+            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7) },  // Floor (light gray)
+//            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7) },  // Ceiling (light gray)
+            
+            // Tall box
+            { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3) },  // Front face (orange)
+            { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3) },  // Left face
+            { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3) },  // Right face
+            { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3) },  // Back face
+            { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3) },  // Top face
+            
+            // Short box
+            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.3, 0.6, 0.9) },  // Front face (blue-ish)
+            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.3, 0.6, 0.9) },  // Left face
+            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.3, 0.6, 0.9) },  // Right face
+            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.3, 0.6, 0.9) },  // Back face
+            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.3, 0.6, 0.9) },  // Top face
         },
         .triangles = {
-            { float3(2, 0, -6), float3(0, 0, -6), float3(0, 1, -6), half3(1, 1, 0) }
+//            { float3(0, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 0), true }  // Light source (yellow triangle)
+            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), half3(1,1,0),true},
+            { float3(-2, 2, -8), float3(2, 2, -3), float3(2, 2, -8), half3(1,1,0),true}, // Light source (yellow triangle)
         }
     };
     
+    uint rngState = uint(in.position.x * 1973 + in.position.y * 9277) | 1;
     float2 uv = in.texCoord;
     float2 normalizedUV = uv * 2 - 1; // -1 (top left) to +1 (bottom right)
     float3 rayPosition = float3(0);
@@ -239,6 +328,10 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
 //    float2 resolution = in.position.xy / in.texCoord;
 //    rayTarget.y /= resolution.x / resolution.y; // aspect ratio messes things up. i think it's already accounted for in projection matrix in vertex shader.
     float3 rayDirection = normalize(rayTarget - rayPosition);
-    float3 color = rayTrace(rayPosition, rayDirection, scene);
+    float3 color = float3(0);
+    for (int i = 0; i < NUM_MONTE_CARLO_SAMPLES; ++i)
+        color += pathTrace(rayPosition, rayDirection, scene, rngState);
+    color /= NUM_MONTE_CARLO_SAMPLES;
+//    float3 color = rayTraceHit(rayPosition, rayDirection, scene).albedo;
     return float4(color.xyz, 1);
 }
