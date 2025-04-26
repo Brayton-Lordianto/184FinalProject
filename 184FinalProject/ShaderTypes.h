@@ -34,6 +34,7 @@ typedef NS_ENUM(EnumBackingType, VertexAttribute)
 typedef NS_ENUM(EnumBackingType, TextureIndex)
 {
     TextureIndexColor    = 0,
+    TextureIndexCompute  = 1, 
 };
 
 typedef struct
@@ -46,6 +47,12 @@ typedef struct
 {
     Uniforms uniforms[2];
 } UniformsArray;
+
+typedef struct {
+    float time;
+    simd_float2 resolution;
+} ComputeParams;
+
 
 #endif /* ShaderTypes_h */
 

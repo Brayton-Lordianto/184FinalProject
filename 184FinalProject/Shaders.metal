@@ -38,8 +38,8 @@ typedef struct RayHit
 // spheres/quad/plane
 #define SUPER_FAR 1000000.0
 #define NUM_SPHERES 1
-#define NUM_QUADS 14
-#define NUM_TRIANGLES 2
+#define NUM_QUADS 15
+#define NUM_TRIANGLES 1
 typedef struct { float3 c; float r; half3 color; } Sphere;
 typedef struct { float3 p0, p1, p2, p3; half3 color; } Quad;
 typedef struct Triangle { float3 p1, p2, p3; half3 color; bool isLightSource=false; } Triangle;
@@ -271,8 +271,14 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
 }
 
 fragment float4 fragmentShader(ColorInOut in [[stage_in]],
+                               texture2d<float> computeTexture [[ texture(TextureIndexCompute) ]],
                                texture2d<half> colorMap     [[ texture(TextureIndexColor) ]])
 {
+    // MARK: test compute shader
+    float4 computeColor = computeTexture.sample(sampler(filter::linear),
+      in.texCoord);
+    return computeColor; 
+    // MARK: end test compute shader
 //    Scene scene;
 //    scene = {
 //        .spheres = {
@@ -287,7 +293,7 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
 //        }
 //    };
     
-    // simple cornell box. 
+    // simple cornell box.
     Scene scene = {
         .spheres = {
         },
@@ -297,7 +303,7 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
             { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2) },  // Left wall (red)
             { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2) },  // Right wall (green)
             { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7) },  // Floor (light gray)
-//            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7) },  // Ceiling (light gray)
+            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7) },  // Ceiling (light gray)
             
             // Tall box
             { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3) },  // Front face (orange)
@@ -314,9 +320,9 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
             { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.3, 0.6, 0.9) },  // Top face
         },
         .triangles = {
-//            { float3(0, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 0), true }  // Light source (yellow triangle)
-            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), half3(1,1,0),true},
-            { float3(-2, 2, -8), float3(2, 2, -3), float3(2, 2, -8), half3(1,1,0),true}, // Light source (yellow triangle)
+            { float3(0, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true }  // Light source 
+//            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), half3(1,1,0),true},
+//            { float3(-2, 2, -8), float3(2, 2, -3), float3(2, 2, -8), half3(1,1,0),true}, // Light source (yellow triangle)
         }
     };
     
