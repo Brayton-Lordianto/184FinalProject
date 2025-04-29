@@ -246,7 +246,7 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
     float3 rayDir = rayDirection;
     
     int c_numBounces = 3;
-    int c_rayPosNormalNudge = 0.001;
+    float c_rayPosNormalNudge = 0.001;
     for (int bounce = 0; bounce <= c_numBounces; ++bounce)
     {
         // Use the current ray position and direction
@@ -275,9 +275,9 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                texture2d<half> colorMap     [[ texture(TextureIndexColor) ]])
 {
     // MARK: test compute shader
-    float4 computeColor = computeTexture.sample(sampler(filter::linear),
-      in.texCoord);
-    return computeColor; 
+//    float4 computeColor = computeTexture.sample(sampler(filter::linear),
+//      in.texCoord);
+//    return computeColor; 
     // MARK: end test compute shader
 //    Scene scene;
 //    scene = {
@@ -328,12 +328,16 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
     
     uint rngState = uint(in.position.x * 1973 + in.position.y * 9277) | 1;
     float2 uv = in.texCoord;
-    float2 normalizedUV = uv * 2 - 1; // -1 (top left) to +1 (bottom right)
+    float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
+    float phi   = (1.0 - uv.y) * M_PI_F; // latitude: 0 to π (flip y to match screen coords)
     float3 rayPosition = float3(0);
-    float3 rayTarget = float3(normalizedUV, 1.0);
-//    float2 resolution = in.position.xy / in.texCoord;
-//    rayTarget.y /= resolution.x / resolution.y; // aspect ratio messes things up. i think it's already accounted for in projection matrix in vertex shader.
-    float3 rayDirection = normalize(rayTarget - rayPosition);
+    float3 rayDirection;
+    rayDirection.x = sin(phi) * cos(theta);
+    rayDirection.y = cos(phi);
+    rayDirection.z = sin(phi) * sin(theta);
+    
+    // Apply tiny random jitter to ray direction for anti-aliasing
+    rayDirection = normalize(rayDirection + RandomUnitVector(rngState) * 0.001);
     float3 color = float3(0);
     for (int i = 0; i < NUM_MONTE_CARLO_SAMPLES; ++i)
         color += pathTrace(rayPosition, rayDirection, scene, rngState);
