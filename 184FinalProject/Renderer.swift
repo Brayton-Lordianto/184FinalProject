@@ -78,8 +78,30 @@ actor Renderer {
     let worldTracking: WorldTrackingProvider
     let layerRenderer: LayerRenderer
     let appModel: AppModel
+
+    /*
+    type sphere 
+    let spheres = [Sphere]
+    ...
+    */
+
+    static func loadFile(String: fileName) {
+        
+    }
     
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
+        let usdzFileName = ""
+        // do some loading and then processing to the file here
+        /*
+        let loaded = loadFile(...)
+        spheres = loaded.spheres
+        ...
+        */ 
+        // end
+
+        
+
+
         self.layerRenderer = layerRenderer
         self.device = layerRenderer.device
         self.commandQueue = self.device.makeCommandQueue()!
@@ -208,7 +230,7 @@ actor Renderer {
         /// Create and condition mesh data to feed into a pipeline using the given vertex descriptor
         
         let metalAllocator = MTKMeshBufferAllocator(device: device)
-        
+
         var mdlMesh = MDLMesh.newBox(withDimensions: SIMD3<Float>(4, 4, 4),
                                      segments: SIMD3<UInt32>(2, 2, 2),
                                      geometryType: MDLGeometryType.triangles,
@@ -345,8 +367,10 @@ actor Renderer {
             let view = drawable.views[viewIndex]
             let viewMatrix = (simdDeviceAnchor * view.transform).inverse
             let projection = drawable.computeProjection(viewIndex: viewIndex)
+            // MARK: add objects to uniforms 
             
             return Uniforms(projectionMatrix: projection, modelViewMatrix: viewMatrix * modelMatrix)
+            // , spheres: spheres, ...) 
         }
         
         self.uniforms[0].uniforms.0 = uniforms(forViewIndex: 0)
