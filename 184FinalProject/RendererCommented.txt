@@ -1,0 +1,703 @@
+//
+//  Renderer.swift
+//  Bubble
+//
+//  Created by Brayton Lordianto on 1/23/25.
+//
+// MARK: first try with custom additional data in single mesh from new app.
+// and start looking for inspiration from test apps
+
+import CompositorServices
+import Metal
+import MetalKit
+import simd
+import Spatial
+
+// The 256 byte aligned size of our uniform structure
+let alignedUniformsSize = (MemoryLayout<SceneUniformsArray>.size + 0xFF) & -0x100
+let alignedMeshUniformsSize = (MemoryLayout<MeshUniformsArray>.size + 0xFF) & -0x100
+
+let maxBuffersInFlight = 3
+
+enum RendererError: Error {
+    case badVertexDescriptor
+}
+
+struct Mesh {
+    let mtkMesh: MTKMesh
+    var transform: matrix_float4x4  // For position/rotation
+    let texture: MTLTexture         // Each mesh can have its own texture
+    let instanceCount: Int = 1      // Number of instances/clones with same/diff params to draw
+    let meshIndexBuffer: MTLBuffer
+    // let's stick with single meshes for now.
+//    let MeshUniformIdxOffset: Int   // Offset in MeshUniformsArray to start for this mesh
+}
+
+extension LayerRenderer.Clock.Instant.Duration {
+    var timeInterval: TimeInterval {
+        let nanoseconds = TimeInterval(components.attoseconds / 1_000_000_000)
+        return TimeInterval(components.seconds) + (nanoseconds / TimeInterval(NSEC_PER_SEC))
+    }
+}
+
+final class RendererTaskExecutor: TaskExecutor {
+    private let queue = DispatchQueue(label: "RenderThreadQueue", qos: .userInteractive)
+
+    func enqueue(_ job: UnownedJob) {
+        queue.async {
+          job.runSynchronously(on: self.asUnownedSerialExecutor())
+        }
+    }
+
+    func asUnownedSerialExecutor() -> UnownedTaskExecutor {
+        return UnownedTaskExecutor(ordinary: self)
+    }
+
+    static var shared: RendererTaskExecutor = RendererTaskExecutor()
+}
+
+actor Renderer {
+
+    let device: MTLDevice
+    let commandQueue: MTLCommandQueue
+    var pipelineState: MTLRenderPipelineState
+    var depthState: MTLDepthStencilState
+    var colorMap: MTLTexture
+
+    let inFlightSemaphore = DispatchSemaphore(value: maxBuffersInFlight)
+
+    // SCENE uniforms
+    var dynamicUniformBuffer: MTLBuffer
+    var uniformBufferOffset = 0
+    var uniformBufferIndex = 0
+    var uniforms: UnsafeMutablePointer<SceneUniformsArray>
+    
+    // MESH uniforms
+    var dynamicMeshUniformBuffer: MTLBuffer
+    var meshUniformBufferOffset = 0
+    var meshUniformBufferIndex = 0
+    var meshUniforms: UnsafeMutablePointer<MeshUniformsArray>
+
+    let rasterSampleCount: Int
+    var memorylessTargetIndex: Int = 0
+    var memorylessTargets: [(color: MTLTexture, depth: MTLTexture)?]
+
+    var rotation: Float = 0
+
+    // your meshes can be shared with the outside!
+    var meshes: [Mesh]
+    // additional parameters for instance-based data
+    var viewMatrix: simd_float4x4 = .init()
+
+    let arSession: ARKitSession
+    let worldTracking: WorldTrackingProvider
+    let layerRenderer: LayerRenderer
+    let appModel: AppModel
+
+    init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
+        self.layerRenderer = layerRenderer
+        self.device = layerRenderer.device
+        self.commandQueue = self.device.makeCommandQueue()!
+        self.appModel = appModel
+
+        let device = self.device
+        if device.supports32BitMSAA && device.supportsTextureSampleCount(4) {
+            rasterSampleCount = 4
+        } else {
+            rasterSampleCount = 1
+        }
+
+        // MARK: i moved this to the top. it's notreally related to the uniforms buffering setup
+        self.memorylessTargets = .init(repeating: nil, count: maxBuffersInFlight)
+        
+        /// ===============================================
+        // MARK: this is where we set the buffer for uniforms
+        // you do this instead of just passing a single buffer because you change the uniforms in the CPU side
+        // dynamic: MTLBuffer | uniforms: Pointer
+        // we bind the two, except they are of different types, but basically same memory.
+        // dynamic is shared/mnaged by Metal while uniforms is a CPU side pointer to write to CPU copy
+            // modify data in CPU of uniforms, which synchoronizes to GPU through dynamic
+        let uniformBufferSize = alignedUniformsSize * maxBuffersInFlight
+        self.dynamicUniformBuffer = self.device.makeBuffer(length:uniformBufferSize,
+                                                           options:[MTLResourceOptions.storageModeShared])!
+        self.dynamicUniformBuffer.label = "UniformBuffer"
+        uniforms = UnsafeMutableRawPointer(dynamicUniformBuffer.contents()).bindMemory(to:SceneUniformsArray.self, capacity:1)
+        /// ===============================================
+        
+        /// ===============================================
+        // MARK: we do the same for the mesh uniforms
+        let meshUniformBufferSize = alignedMeshUniformsSize * maxBuffersInFlight
+        self.dynamicMeshUniformBuffer = self.device.makeBuffer(length:meshUniformBufferSize,
+                                                               options:[MTLResourceOptions.storageModeShared])!
+        self.dynamicMeshUniformBuffer.label = "MeshUniformBuffer"
+        meshUniforms = UnsafeMutableRawPointer(dynamicMeshUniformBuffer.contents()).bindMemory(to:MeshUniformsArray.self, capacity:1)
+        /// ===============================================
+        
+
+        let mtlVertexDescriptor = Renderer.buildMetalVertexDescriptor()
+
+        do {
+            pipelineState = try Renderer.buildRenderPipelineWithDevice(device: device,
+                                                                       layerRenderer: layerRenderer,
+                                                                       rasterSampleCount: rasterSampleCount,
+                                                                       mtlVertexDescriptor: mtlVertexDescriptor)
+        } catch {
+            fatalError("Unable to compile render pipeline state.  Error info: \(error)")
+        }
+
+        let depthStateDescriptor = MTLDepthStencilDescriptor()
+        depthStateDescriptor.depthCompareFunction = MTLCompareFunction.greater
+        depthStateDescriptor.isDepthWriteEnabled = true
+        self.depthState = device.makeDepthStencilState(descriptor:depthStateDescriptor)!
+
+        do {
+            meshes = try Renderer.buildMesh(device: device, mtlVertexDescriptor: mtlVertexDescriptor)
+        } catch {
+            fatalError("Unable to build MetalKit Mesh. Error info: \(error)")
+        }
+
+        do {
+            colorMap = try Renderer.loadTexture(device: device, textureName: "ColorMap")
+        } catch {
+            fatalError("Unable to load texture. Error info: \(error)")
+        }
+
+        worldTracking = WorldTrackingProvider()
+        arSession = ARKitSession()
+    }
+
+    private func startARSession() async {
+        do {
+            try await arSession.run([worldTracking])
+        } catch {
+            fatalError("Failed to initialize ARSession")
+        }
+    }
+
+    @MainActor
+    static func startRenderLoop(_ layerRenderer: LayerRenderer, appModel: AppModel) {
+        Task(executorPreference: RendererTaskExecutor.shared) {
+            let renderer = Renderer(layerRenderer, appModel: appModel)
+            await renderer.startARSession()
+            await renderer.renderLoop()
+        }
+    }
+
+    static func buildMetalVertexDescriptor() -> MTLVertexDescriptor {
+        // Create a Metal vertex descriptor specifying how vertices will by laid out for input into our render
+        //   pipeline and how we'll layout our Model IO vertices
+
+        let mtlVertexDescriptor = MTLVertexDescriptor()
+        
+        // MARK: I played with the buffer indices. maybe should not?
+        configureVertex(mtlVertexDescriptor,
+                        attribute: VertexAttribute.position.rawValue,
+                        format: .float3, offset: 0,
+                        bufferIndex: VertexAttribute.position.rawValue,
+                        stride: 12)
+        configureVertex(mtlVertexDescriptor,
+                         attribute: VertexAttribute.texcoord.rawValue,
+                         format: .float2,
+                         offset: 0,
+                        bufferIndex: VertexAttribute.texcoord.rawValue,
+                        stride: 8)
+        configureVertex(mtlVertexDescriptor,
+                         attribute: VertexAttribute.meshUniformIdx.rawValue,
+                        format: .ushort,
+                         offset: 0,
+                         bufferIndex: VertexAttribute.meshUniformIdx.rawValue,
+                        stride: MemoryLayout<UInt32>.stride)
+        return mtlVertexDescriptor
+    }
+
+    static func buildRenderPipelineWithDevice(device: MTLDevice,
+                                              layerRenderer: LayerRenderer,
+                                              rasterSampleCount: Int,
+                                              mtlVertexDescriptor: MTLVertexDescriptor) throws -> MTLRenderPipelineState {
+        /// Build a render state pipeline object
+
+        let library = device.makeDefaultLibrary()
+
+        let vertexFunction = library?.makeFunction(name: "vertexShader")
+        let fragmentFunction = library?.makeFunction(name: "fragmentShader")
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.label = "RenderPipeline"
+        pipelineDescriptor.vertexFunction = vertexFunction
+        pipelineDescriptor.fragmentFunction = fragmentFunction
+        pipelineDescriptor.vertexDescriptor = mtlVertexDescriptor
+        pipelineDescriptor.rasterSampleCount = rasterSampleCount
+
+        pipelineDescriptor.colorAttachments[0].pixelFormat = layerRenderer.configuration.colorFormat
+        pipelineDescriptor.depthAttachmentPixelFormat = layerRenderer.configuration.depthFormat
+
+        pipelineDescriptor.maxVertexAmplificationCount = layerRenderer.properties.viewCount
+
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    static func buildMesh(device: MTLDevice,
+                          mtlVertexDescriptor: MTLVertexDescriptor) throws -> [Mesh] {
+        /// Create and condition mesh data to feed into a pipeline using the given vertex descriptor
+
+        let metalAllocator = MTKMeshBufferAllocator(device: device)
+        
+        
+        // a box and then a sphere mesh
+        let boxMdlMesh = MDLMesh.newBox(withDimensions: SIMD3<Float>(4, 4, 4),
+                                         segments: SIMD3<UInt32>(2, 2, 2),
+                                         geometryType: MDLGeometryType.triangles,
+                                         inwardNormals:false,
+                                         allocator: metalAllocator)
+        let sphereMdlMesh = MDLMesh.newEllipsoid(withRadii: SIMD3<Float>(2, 2, 2),
+                                                 radialSegments: 20,
+                                                 verticalSegments: 20,
+                                                 geometryType: .triangles,
+                                                    inwardNormals: false, hemisphere: false,
+                                                 allocator: metalAllocator)
+        
+        // set vertex descriptors
+        // this basically sets the vertex as having position types and then texture coords for each vertex
+        // MARK: before this function, we already built the mtlvertexdescriptor and set it to this
+        let mdlVertexDescriptor = MTKModelIOVertexDescriptorFromMetal(mtlVertexDescriptor)
+        guard let attributes = mdlVertexDescriptor.attributes as? [MDLVertexAttribute] else {
+            throw RendererError.badVertexDescriptor
+        }
+        attributes[VertexAttribute.position.rawValue].name = MDLVertexAttributePosition
+        attributes[VertexAttribute.texcoord.rawValue].name = MDLVertexAttributeTextureCoordinate
+        boxMdlMesh.vertexDescriptor = mdlVertexDescriptor
+        sphereMdlMesh.vertexDescriptor = mdlVertexDescriptor
+        
+        // Create mesh index buffers, which is just repeating array
+        func createMeshIndexBuffer(device: MTLDevice, meshIndex: Int, vertexCount: Int) -> MTLBuffer {
+            let indices = Array(repeating: meshIndex, count: vertexCount)
+            return device.makeBuffer(bytes: indices,
+                                   length: MemoryLayout<UInt32>.stride * vertexCount,
+                                   options: [MTLResourceOptions.storageModeShared])!
+        }
+
+        // create the Mesh objects (custom type)
+        let boxMesh = Mesh(mtkMesh: try MTKMesh(mesh:boxMdlMesh, device:device),
+                            transform: matrix4x4_translation(4, 0, -8),
+                           texture: try loadTexture(device: device, textureName: "ColorMap"),
+                           meshIndexBuffer: createMeshIndexBuffer(device: device, meshIndex: 1, vertexCount: boxMdlMesh.vertexCount))
+        let sphereMesh = Mesh(mtkMesh: try MTKMesh(mesh:sphereMdlMesh, device:device),
+                               transform: matrix4x4_translation(-4, 0, -8),
+                               texture: try loadTexture(device: device, textureName: "ColorMap"),
+                              meshIndexBuffer: createMeshIndexBuffer(device: device, meshIndex: 1, vertexCount: sphereMdlMesh.vertexCount))
+        return [sphereMesh, boxMesh]
+    }
+
+    static func loadTexture(device: MTLDevice,
+                            textureName: String) throws -> MTLTexture {
+        /// Load texture data with optimal parameters for sampling
+
+        let textureLoader = MTKTextureLoader(device: device)
+
+        let textureLoaderOptions = [
+            MTKTextureLoader.Option.textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+            MTKTextureLoader.Option.textureStorageMode: NSNumber(value: MTLStorageMode.`private`.rawValue)
+        ]
+
+        return try textureLoader.newTexture(name: textureName,
+                                            scaleFactor: 1.0,
+                                            bundle: nil,
+                                            options: textureLoaderOptions)
+    }
+
+    private func updateDynamicBufferState() {
+        /// Update the state of our uniform buffers before rendering
+
+        uniformBufferIndex = (uniformBufferIndex + 1) % maxBuffersInFlight
+        uniformBufferOffset = alignedUniformsSize * uniformBufferIndex
+        uniforms = UnsafeMutableRawPointer(dynamicUniformBuffer.contents() + uniformBufferOffset).bindMemory(to:SceneUniformsArray.self, capacity:1)
+        
+        // MARK: do the same for the mesh uniforms
+        meshUniformBufferIndex = (meshUniformBufferIndex + 1) % maxBuffersInFlight
+        meshUniformBufferOffset = alignedMeshUniformsSize * meshUniformBufferIndex
+        meshUniforms = UnsafeMutableRawPointer(dynamicMeshUniformBuffer.contents() + meshUniformBufferOffset).bindMemory(to:MeshUniformsArray.self, capacity:1)
+        
+    }
+
+    private func memorylessRenderTargets(drawable: LayerRenderer.Drawable) -> (color: MTLTexture, depth: MTLTexture) {
+
+        func renderTarget(resolveTexture: MTLTexture, cachedTexture: MTLTexture?) -> MTLTexture {
+            if let cachedTexture,
+               resolveTexture.width == cachedTexture.width && resolveTexture.height == cachedTexture.height {
+                return cachedTexture
+            } else {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: resolveTexture.pixelFormat,
+                                                                          width: resolveTexture.width,
+                                                                          height: resolveTexture.height,
+                                                                          mipmapped: false)
+                descriptor.usage = .renderTarget
+                descriptor.textureType = .type2DMultisampleArray
+                descriptor.sampleCount = rasterSampleCount
+                descriptor.storageMode = .memoryless
+                descriptor.arrayLength = resolveTexture.arrayLength
+                return resolveTexture.device.makeTexture(descriptor: descriptor)!
+            }
+        }
+
+        memorylessTargetIndex = (memorylessTargetIndex + 1) % maxBuffersInFlight
+
+        let cachedTargets = memorylessTargets[memorylessTargetIndex]
+        let newTargets = (renderTarget(resolveTexture: drawable.colorTextures[0], cachedTexture: cachedTargets?.color),
+                          renderTarget(resolveTexture: drawable.depthTextures[0], cachedTexture: cachedTargets?.depth))
+
+        memorylessTargets[memorylessTargetIndex] = newTargets
+
+        return newTargets
+    }
+
+    private func updateGameState(drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) {
+        /// Update any game state before rendering
+        let simdDeviceAnchor = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
+
+        func uniforms(forViewIndex viewIndex: Int) -> SceneUniforms {
+            let view = drawable.views[viewIndex]
+            self.viewMatrix = (simdDeviceAnchor * view.transform).inverse
+            let projection = drawable.computeProjection(viewIndex: viewIndex)
+
+            return SceneUniforms(
+                projectionMatrix: projection,
+                viewMatrix: viewMatrix,
+                // MARK: multiply by viewmatrix to get perspective relative to the camera
+                // this is no longer constant for whole scene.
+                // modelViewMatrix: viewMatrix * modelMatrix,
+                // MARK: this is your inverse matrix
+                cameraPosition: viewMatrix.inverse.translation
+            )
+        }
+        
+        func meshUniforms(forMeshInstance: Int) -> MeshUniforms {
+            let modelMatrix = meshes[forMeshInstance].transform
+            return MeshUniforms(modelMatrix: modelMatrix,
+                                normalMatrix: simd_float3x3(
+                                    modelMatrix[0].xyz,
+                                    modelMatrix[1].xyz,
+                                    modelMatrix[2].xyz
+                                ).inverse.transpose
+            )
+        }
+
+        // MARK: here we update the uniforms, which later is accessed to vertex buffer through `dynamic..`
+        self.uniforms[0].uniforms.0 = uniforms(forViewIndex: 0)
+        self.uniforms[0].time = Float(CFAbsoluteTimeGetCurrent())
+        // MARK: set the same uniforms for the second screen view as well.
+        // so we can either add multiple uniforms for different meshes here as part of it, or smt else
+        if drawable.views.count > 1 {
+            self.uniforms[0].uniforms.1 = uniforms(forViewIndex: 1)
+        }
+            
+        // MARK: similarly, this is where we should update the uniforms for the every model/mesh at the new frame
+        self.meshUniforms[0].activeMeshes = UInt32(meshes.count)
+        for idx in 0..<meshes.count {
+            let meshUniforms = meshUniforms(forMeshInstance: idx)
+            self.meshUniforms[0].setMeshUniform(meshUniforms, at: idx)
+        }
+        
+        // MARK: let's mark everything in meshes.meshuniformidx into 1
+        for mesh in self.meshes {
+            let meshIndexBuffer = mesh.meshIndexBuffer
+            let meshIndexBufferPointer = meshIndexBuffer.contents().bindMemory(to: UInt32.self, capacity: meshIndexBuffer.length)
+            for i in 0..<meshIndexBuffer.length / MemoryLayout<UInt32>.stride {
+                meshIndexBufferPointer[i] = 10
+            }
+        }
+    }
+
+    func renderFrame() {
+        /// Per frame updates hare
+
+        guard let frame = layerRenderer.queryNextFrame() else { return }
+
+        frame.startUpdate()
+
+        // Perform frame independent work
+
+        frame.endUpdate()
+
+        guard let timing = frame.predictTiming() else { return }
+        LayerRenderer.Clock().wait(until: timing.optimalInputTime)
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            fatalError("Failed to create command buffer")
+        }
+
+        guard let drawable = frame.queryDrawable() else { return }
+
+        _ = inFlightSemaphore.wait(timeout: DispatchTime.distantFuture)
+
+        frame.startSubmission()
+
+        let time = LayerRenderer.Clock.Instant.epoch.duration(to: drawable.frameTiming.presentationTime).timeInterval
+        let deviceAnchor = worldTracking.queryDeviceAnchor(atTimestamp: time)
+
+        drawable.deviceAnchor = deviceAnchor
+
+        let semaphore = inFlightSemaphore
+        commandBuffer.addCompletedHandler { (_ commandBuffer)-> Swift.Void in
+            semaphore.signal()
+        }
+
+        self.updateDynamicBufferState()
+
+        self.updateGameState(drawable: drawable, deviceAnchor: deviceAnchor)
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+
+        if rasterSampleCount > 1 {
+            let renderTargets = memorylessRenderTargets(drawable: drawable)
+            renderPassDescriptor.colorAttachments[0].resolveTexture = drawable.colorTextures[0]
+            renderPassDescriptor.colorAttachments[0].texture = renderTargets.color
+            renderPassDescriptor.depthAttachment.resolveTexture = drawable.depthTextures[0]
+            renderPassDescriptor.depthAttachment.texture = renderTargets.depth
+
+            renderPassDescriptor.colorAttachments[0].storeAction = .multisampleResolve
+            renderPassDescriptor.depthAttachment.storeAction = .multisampleResolve
+        } else {
+            renderPassDescriptor.colorAttachments[0].texture = drawable.colorTextures[0]
+            renderPassDescriptor.depthAttachment.texture = drawable.depthTextures[0]
+
+            renderPassDescriptor.colorAttachments[0].storeAction = .store
+            renderPassDescriptor.depthAttachment.storeAction = .store
+        }
+
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0)
+        renderPassDescriptor.depthAttachment.loadAction = .clear
+        renderPassDescriptor.depthAttachment.clearDepth = 0.0
+        renderPassDescriptor.rasterizationRateMap = drawable.rasterizationRateMaps.first
+        if layerRenderer.configuration.layout == .layered {
+            renderPassDescriptor.renderTargetArrayLength = drawable.views.count
+        }
+
+        /// Final pass rendering code here
+        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            fatalError("Failed to create render encoder")
+        }
+
+        // MARK: extra setup for the render encoder
+        renderEncoder.label = "Primary Render Encoder"
+        renderEncoder.pushDebugGroup("Draw Meshes")
+        renderEncoder.setCullMode(.back)
+        renderEncoder.setFrontFacing(.counterClockwise)
+        renderEncoder.setRenderPipelineState(pipelineState)
+        renderEncoder.setDepthStencilState(depthState)
+        
+        // MARK: put the uniform into the buffer
+        // the index here is 2! this means it is put after the first and second index
+        renderEncoder.setVertexBuffer(dynamicUniformBuffer, offset:uniformBufferOffset, index: BufferIndex.sceneUniforms.rawValue)
+        
+        // MARK: we set the uniforms for all meshes at once
+        renderEncoder.setVertexBuffer(dynamicMeshUniformBuffer, offset:meshUniformBufferOffset, index: BufferIndex.meshUniforms.rawValue)
+        
+        // MARK: set up view ports
+        let viewports = drawable.views.map { $0.textureMap.viewport }
+        renderEncoder.setViewports(viewports)
+        
+        // MARK: this is your amp_id which determines your two screens on the vision pro!
+        if drawable.views.count > 1 {
+            var viewMappings = (0..<drawable.views.count).map {
+                MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
+                                                  renderTargetArrayIndexOffset: UInt32($0))
+            }
+            renderEncoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappings)
+        }
+
+        // MARK: this is where you usually draw the single mesh. now we just do the rendering for multiple.
+        // read into meshes[0].indexBuffer
+//        renderEncoder.setVertexBuffer(meshes[1].meshIndexBuffer, offset: 0, index: VertexAttribute.meshUniformIdx.rawValue)
+        for (meshIdx, mesh) in meshes.enumerated() {
+
+            // MARK: per mesh data
+            // addd the buffer for the id to get into the mesh uniform array
+            renderEncoder.setVertexBuffer(mesh.meshIndexBuffer, offset: 0, index: VertexAttribute.meshUniformIdx.rawValue)
+            
+            // MARK: put the mesh positions into the buffer
+            let mtkMesh = mesh.mtkMesh
+            // for each of the properties of the mesh, add the buffers for it. the buffers already stored.
+            for (index, element) in mtkMesh.vertexDescriptor.layouts.enumerated() {
+                guard let layout = element as? MDLVertexBufferLayout else {
+                    return
+                }
+                
+                if layout.stride != 0 {
+                    let buffer = mtkMesh.vertexBuffers[index]
+                    
+                    // MARK: the index here is 0 for Mesh Positions and 1 for Mesh Generics
+                        // defined in ShaderTypes
+                    // additionally defined the first as float3 and second as float2 (for texcoords)
+                    // so we have float3, float2, Uniforms
+                    renderEncoder.setVertexBuffer(buffer.buffer, offset:buffer.offset, index: index)
+                }
+            }
+            
+            renderEncoder.setFragmentTexture(colorMap, index: TextureIndex.color.rawValue)
+            
+            // just in case the submeshes have different primitive structures, we draw every submesh
+            // MARK: misconception about instance count fixed.
+            // instance count is how many times to draw the indexed primtive.
+            // if you have a sphere mesh and want 100 spheres, instead of 100 spheres * # of vertices in a sphere,
+            // you just draw the sphere mesh 100 times with the same vertex buffer.
+            // and get it with different number of instance
+            // MARK: you can mix both methods
+            // keeping meshInstanceOffset which marks where in MeshUniforms to start for that mesh
+            // then for the instance do `meshInstanceOffset + (instanceIndex - 1)`
+                // e.g. with mesh 1 and 2 having 1 instance, (0 and 1 respectively)
+                // 2nd instance of mesh 3 starting from 2 = 2 + (2 - 1) = 3
+            for submesh in mtkMesh.submeshes {
+                // but instance count can't be zero
+                renderEncoder.drawIndexedPrimitives(type: submesh.primitiveType,
+                                                    indexCount: submesh.indexCount,
+                                                    indexType: submesh.indexType,
+                                                    indexBuffer: submesh.indexBuffer.buffer,
+                                                    indexBufferOffset: submesh.indexBuffer.offset,
+                                                    instanceCount: mesh.instanceCount)
+            }
+        }
+
+        // MARK: this is the end
+        renderEncoder.popDebugGroup()
+        renderEncoder.endEncoding()
+        drawable.encodePresent(commandBuffer: commandBuffer)
+        commandBuffer.commit()
+        frame.endSubmission()
+    }
+
+    func renderLoop() {
+        while true {
+            if layerRenderer.state == .invalidated {
+                print("Layer is invalidated")
+                Task { @MainActor in
+                    appModel.immersiveSpaceState = .closed
+                }
+                return
+            } else if layerRenderer.state == .paused {
+                Task { @MainActor in
+                    appModel.immersiveSpaceState = .inTransition
+                }
+                layerRenderer.waitUntilRunning()
+                continue
+            } else {
+                Task { @MainActor in
+                    if appModel.immersiveSpaceState != .open {
+                        appModel.immersiveSpaceState = .open
+                    }
+                }
+                autoreleasepool {
+                    self.renderFrame()
+                }
+            }
+        }
+    }
+}
+
+// Generic matrix math utility functions
+func matrix4x4_rotation(radians: Float, axis: SIMD3<Float>) -> matrix_float4x4 {
+    let unitAxis = normalize(axis)
+    let ct = cosf(radians)
+    let st = sinf(radians)
+    let ci = 1 - ct
+    let x = unitAxis.x, y = unitAxis.y, z = unitAxis.z
+    return matrix_float4x4.init(columns:(vector_float4(    ct + x * x * ci, y * x * ci + z * st, z * x * ci - y * st, 0),
+                                         vector_float4(x * y * ci - z * st,     ct + y * y * ci, z * y * ci + x * st, 0),
+                                         vector_float4(x * z * ci + y * st, y * z * ci - x * st,     ct + z * z * ci, 0),
+                                         vector_float4(                  0,                   0,                   0, 1)))
+}
+
+func matrix4x4_translation(_ translationX: Float, _ translationY: Float, _ translationZ: Float) -> matrix_float4x4 {
+    return matrix_float4x4.init(columns:(vector_float4(1, 0, 0, 0),
+                                         vector_float4(0, 1, 0, 0),
+                                         vector_float4(0, 0, 1, 0),
+                                         vector_float4(translationX, translationY, translationZ, 1)))
+}
+
+func radians_from_degrees(_ degrees: Float) -> Float {
+    return (degrees / 180) * .pi
+}
+
+extension simd_float4x4 {
+
+    var translation: SIMD3<Float> {
+        columns.3.xyz
+    }
+}
+
+extension SIMD4 {
+    var xyz: SIMD3<Scalar> {
+        .init(x: x, y: y, z: z)
+    }
+}
+
+extension MeshUniformsArray {
+    mutating func getMeshUniform(at index: Int) -> MeshUniforms {
+        precondition(index < MESH_NUM, "Index out of bounds")
+        return withUnsafeBytes(of: uniforms) { bytes in
+            bytes.load(fromByteOffset: index * MemoryLayout<MeshUniforms>.stride, as: MeshUniforms.self)
+        }
+    }
+
+    // MARK: you need to set this differently because in swift, a C fixed array just becomes a tuple in swift.
+    mutating func setMeshUniform(_ uniform: MeshUniforms, at index: Int) {
+        precondition(index < MESH_NUM, "Index out of bounds")
+        withUnsafeMutableBytes(of: &uniforms) { bytes in
+            bytes.storeBytes(of: uniform, toByteOffset: index * MemoryLayout<MeshUniforms>.stride, as: MeshUniforms.self)
+        }
+    }
+}
+//
+//extension Renderer {
+//    func addMesh(_ mtkMesh: MTKMesh, transform: matrix_float4x4, texture: MTLTexture, instanceCount: Int = 1) {
+//
+//    }
+//}
+
+func debugPrintMTLBuffer<T>(_ buffer: MTLBuffer, _ type: T.Type, _ terminate: Bool = false) {
+    #if DEBUG
+    let typeSize = MemoryLayout<T>.size
+    let count = buffer.length / typeSize
+    print("DEBUG MTL BUFFER\n count: \(count) ")
+    for i in 0..<count {
+        let pointer = buffer.contents().advanced(by: i * typeSize).bindMemory(to: T.self, capacity: 1)
+        print(pointer.pointee, terminator: " ")
+    }
+    print()
+    if (terminate) { fatalError("DEBUG END") }
+    #endif
+}
+
+extension Renderer {
+    static func configureVertexAttribute(_ descriptor: MTLVertexDescriptor,
+                                attribute: Int,
+                                format: MTLVertexFormat,
+                                offset: Int,
+                                bufferIndex: Int) {
+        descriptor.attributes[attribute].format = format
+        descriptor.attributes[attribute].offset = offset
+        descriptor.attributes[attribute].bufferIndex = bufferIndex
+    }
+
+    static func configureVertexLayout(_ descriptor: MTLVertexDescriptor,
+                              bufferIndex: Int,
+                              stride: Int,
+                              stepRate: Int = 1,
+                              stepFunction: MTLVertexStepFunction = .perVertex) {
+        descriptor.layouts[bufferIndex].stride = stride
+        descriptor.layouts[bufferIndex].stepRate = stepRate
+        descriptor.layouts[bufferIndex].stepFunction = stepFunction
+    }
+    
+    static func configureVertex(_ descriptor: MTLVertexDescriptor,
+                         attribute: Int,
+                         format: MTLVertexFormat,
+                         offset: Int,
+                         bufferIndex: Int,
+                         stride: Int,
+                         stepRate: Int = 1,
+                         stepFunction: MTLVertexStepFunction = .perVertex) {
+        configureVertexAttribute(descriptor, attribute: attribute, format: format, offset: offset, bufferIndex: bufferIndex)
+        configureVertexLayout(descriptor, bufferIndex: bufferIndex, stride: stride, stepRate: stepRate, stepFunction: stepFunction)
+    }
+}

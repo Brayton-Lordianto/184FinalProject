@@ -1,0 +1,11 @@
+//
+//  iOSAcceleratedRender.metal
+//  184FinalProject
+//
+//  Created by Brayton Lordianto on 4/29/25.
+//
+
+#include <metal_stdlib>
+using namespace metal;
+
+
