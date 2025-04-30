@@ -1,0 +1,73 @@
+//
+//  ShaderTypes.h
+//
+
+//
+//  Header containing types and enum constants shared between Metal shaders and Swift/ObjC source
+//
+#ifndef ShaderTypes_h
+#define ShaderTypes_h
+
+#ifdef __METAL_VERSION__
+#define NS_ENUM(_type, _name) enum _name : _type _name; enum _name : _type
+typedef metal::int32_t EnumBackingType;
+#else
+#import <Foundation/Foundation.h>
+typedef NSInteger EnumBackingType;
+#endif
+
+#include <simd/simd.h>
+
+typedef NS_ENUM(EnumBackingType, BufferIndex)
+{
+    BufferIndexSceneUniforms = 3,
+    BufferIndexMeshUniforms = 4,
+};
+
+typedef NS_ENUM(EnumBackingType, VertexAttribute)
+{
+    VertexAttributePosition  = 0,
+    VertexAttributeTexcoord  = 1,
+    VertexAttributeMeshUniformIdx = 2,
+};
+
+typedef NS_ENUM(EnumBackingType, TextureIndex)
+{
+    TextureIndexColor    = 0,
+};
+
+typedef struct
+{
+    // MARK: used to go from camera space -> clip/screen space [EXTRINSICS]
+    matrix_float4x4 projectionMatrix;
+    // MARK: used to go from model space -> camera space [INTRINSICS]
+    matrix_float4x4 viewMatrix;
+    // MARK: camera position in world space | can be used for lighting calculations
+    simd_float3 cameraPosition;
+} SceneUniforms;
+
+#define AMP_NUM 2
+#define MESH_NUM 100
+
+typedef struct
+{
+    // MARK: contains affine transformation of the model
+    matrix_float4x4 modelMatrix;
+    // MARK: normalMatrix * normal = normal in world space
+    // we use 3x3 because it is just rotational relative to position of mesh. no concept of translation
+    matrix_float3x3 normalMatrix;
+} MeshUniforms;
+
+typedef struct
+{
+    SceneUniforms uniforms[AMP_NUM];
+    float time;
+} SceneUniformsArray;
+
+typedef struct
+{
+    MeshUniforms uniforms[MESH_NUM];
+    uint32_t activeMeshes; // number of active meshes
+} MeshUniformsArray;
+
+#endif /* ShaderTypes_h */
