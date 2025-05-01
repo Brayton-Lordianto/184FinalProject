@@ -11,7 +11,7 @@ using namespace metal;
 #include "ShaderTypes.h"
 
 // Ray Tracing constants
-#define NUM_MONTE_CARLO_SAMPLES 1
+#define NUM_MONTE_CARLO_SAMPLES 4
 #define MAX_BOUNCES 3
 #define SHADOW_BIAS 0.001f
 #define SUPER_FAR 1000000.0
@@ -19,7 +19,7 @@ using namespace metal;
 // Scene constants
 #define NUM_SPHERES 1
 #define NUM_QUADS 15
-#define NUM_TRIANGLES 1
+#define NUM_TRIANGLES 2
 
 // Halton sequence primes for better sampling
 constant unsigned int primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
@@ -85,7 +85,6 @@ float RandomFloat01(thread uint& state) {
     return float(state) / 4294967296.0;
 }
 
-// Halton sequence for better-distributed random numbers
 float halton(unsigned int i, unsigned int d) {
     unsigned int b = primes[d % 12];
     float f = 1.0f;
@@ -205,6 +204,8 @@ RayHit rayTriangleIntersect(float3 rayOrigin, float3 rayDirection, Triangle tria
     
     if (triangle.isLightSource) {
         hit.emission = float3(triangle.color) * triangle.intensity;
+    } else {
+        hit.emission = 0;
     }
     
     return hit;
@@ -300,7 +301,8 @@ bool isInShadow(float3 point, float3 lightDir, float lightDistance, Scene scene)
     
     // Simple shadow check against all objects
     RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene);
-    return hit.hit && hit.dist < lightDistance;
+    // hit.emission trick so if its a light it should output false
+    return (length(hit.emission) <= 0) * hit.hit;
 }
 
 // Sample a point on a triangle light source
@@ -387,8 +389,10 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
         
         // If no hit, add background contribution and break
         if (!hit.hit || hit.dist >= SUPER_FAR) {
-            float3 backgroundColor = float3(0.5 + 0.5 * rayDir.y, 0.7, 0.9 + 0.1 * rayDir.y);
-            finalColor += backgroundColor * throughput * 0.3; // Reduced brightness for better contrast
+//            float3 backgroundColor = float3(0.5 + 0.5 * rayDir.y, 0.7, 0.9 + 0.1 * rayDir.y);
+//            backgroundColor = float3(0);
+//            backgroundColor = float3(1, 0, 1);
+//            finalColor += backgroundColor * throughput * 0.3; // Reduced brightness for better contrast
             break;
         }
         
@@ -401,50 +405,35 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
             break;
         }
         
-        // Add direct lighting contribution via explicit light sampling
-        // For each light source (currently just one triangle)
-        for (int i = 0; i < NUM_TRIANGLES; i++) {
-            Triangle light = scene.triangles[i];
+        // DIRECT LIGHTING AT POINT WE HIT
+        // IMPORTANCE SAMPLE
+        for (int lightI = 0; lightI < NUM_TRIANGLES; ++lightI) {
+            Triangle light = scene.triangles[lightI];
             if (!light.isLightSource) continue;
             
-            // Use a Halton sequence for light sampling (better distribution)
-            float2 lightSample = float2(
-                halton(frameIndex + i * 16 + bounce * 4, 2),
-                halton(frameIndex + i * 16 + bounce * 4, 3)
-            );
-            
-            // Map to barycentric coordinates
-            if (lightSample.x + lightSample.y > 1.0) {
-                lightSample.x = 1.0 - lightSample.x;
-                lightSample.y = 1.0 - lightSample.y;
-            }
-            
-            // Get point on light
-            float3 lightPoint = light.p1 * (1.0 - lightSample.x - lightSample.y) +
-                               light.p2 * lightSample.x +
-                               light.p3 * lightSample.y;
-            
-            float3 lightDir = normalize(lightPoint - hitPoint);
-            float lightDistance = length(lightPoint - hitPoint);
-            
-            // Skip if light is behind the surface
-            float NdotL = dot(hit.normal, lightDir);
-            if (NdotL > 0.0 && !isInShadow(hitPoint, lightDir, lightDistance, scene)) {
-                // Calculate approximate area of light triangle
-                float3 e1 = light.p2 - light.p1;
-                float3 e2 = light.p3 - light.p1;
-                float lightArea = length(cross(e1, e2)) * 0.5;
+            int num_light_samples = NUM_MONTE_CARLO_SAMPLES;
+            for (int i = 0; i < num_light_samples; ++i) {
+                // Sample a point on the light source
+                float3 lightPos = sampleLightSource(light, rng);
                 
-                // Evaluate material BRDF
-                float3 brdf = evaluateBRDF(-rayDir, lightDir, hit.normal, hit.albedo, 
-                                         hit.material, hit.roughness);
+                // Compute direction to light
+                float3 lightDir = normalize(lightPos - hitPoint);
                 
-                float3 lightEmission = float3(light.color) * light.intensity;
-                float attenuation = 1.0 / (lightDistance * lightDistance); // Inverse square falloff
+                // Check if point is in shadow
+                float lightDistance = length(lightPos - hitPoint);
+//                return float3(1, 0, 0);
+//                if (isInShadow(hitPoint, lightDir, lightDistance, scene)) return float3(1,0,0);
+                if (isInShadow(hitPoint, lightDir, lightDistance, scene)) continue;
+//                return float3(0, 1, 0);
                 
-                // Add direct lighting contribution
-                float3 directLight = lightEmission * brdf * NdotL * attenuation * lightArea;
-                finalColor += directLight * throughput;
+                // Compute lighting contribution
+                float3 brdf = evaluateBRDF(-rayDir, lightDir, hit.normal, hit.albedo,
+                                           hit.material, hit.roughness);
+                
+//                // Add contribution to final color
+//                finalColor += float3(1);
+//                return float3(1);
+                finalColor += brdf * throughput * max(0.0, dot(hit.normal, lightDir)) / (lightDistance * lightDistance);
             }
         }
         
@@ -467,7 +456,7 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
             throughput /= p; // Unbiased estimator correction
         }
     }
-    
+     
     return finalColor;
 }
 
@@ -495,28 +484,29 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
 //        },
         .quads = {
             // Room walls, floor, ceiling
-            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIFFUSE, 0.0 },  // Back wall (blue)
-            { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2), DIFFUSE, 0.0 },  // Left wall (red)
-            { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIFFUSE, 0.0 },  // Right wall (green)
-            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), DIFFUSE, 0.0 },  // Floor (light gray)
-            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), DIFFUSE, 0.0 },  // Ceiling (light gray)
+            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIELECTRIC, 0.0 },  // Back wall (blue)
+            { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2), DIELECTRIC, 0.0 },  // Left wall (red)
+            { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIELECTRIC, 0.0 },  // Right wall (green)
+            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), DIELECTRIC, 0.0 },  // Floor (light gray)
+            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), DIELECTRIC, 0.0 },  // Ceiling (light gray)
             
             // Tall box (metallic)
-            { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), METAL, 0.1 },  // Front face
-            { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), METAL, 0.1 },  // Left face
-            { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3), METAL, 0.1 },  // Right face
-            { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), METAL, 0.1 },  // Back face
-            { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), METAL, 0.1 },  // Top face
+            { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Front face
+            { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Left face
+            { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Right face
+            { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Back face
+            { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Top face
             
             // Short box (glass-like)
-            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Front face
-            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Left face
-            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Right face
-            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Back face
-            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Top face
+            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Front face
+            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Left face
+            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Right face
+            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Back face
+            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Top face
         },
         .triangles = {
-            { float3(0, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 5.0 }  // Light source with intensity
+            { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
+            ,{ float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
         }
     };
 
@@ -534,47 +524,19 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     
     uv += jitter;
     
-    // Use the camera position from params
     float3 rayPosition = params.cameraPosition;
-    
-    // Calculate screen position in normalized device coordinates [-1,1]
-    float2 ndc = float2(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0);
-    
-    // Use the field of view passed from Swift
-    float fov = params.fovY;
-    float aspectRatio = params.resolution.x / params.resolution.y;
-    
-    // Create ray direction in camera space
-    float3 cameraSpaceDir;
-    cameraSpaceDir.x = ndc.x * tan(fov/2.0) * aspectRatio;
-    cameraSpaceDir.y = ndc.y * tan(fov/2.0);
-    cameraSpaceDir.z = -1.0; // Looking down the negative Z axis
-    
-    // Transform camera-space direction to world-space using the view matrix
-    // Extract the rotation part of the view matrix (upper 3x3)
-    float3x3 viewRotation = float3x3(
-        params.viewMatrix.columns[0].xyz,
-        params.viewMatrix.columns[1].xyz,
-        params.viewMatrix.columns[2].xy
-    );
-    
-    // Apply the rotation to the camera-space direction
     float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
     float phi = (uv.y) * M_PI_F;   // latitude: 0 to π 540
-
-    float3 rayDirection = normalize(cameraSpaceDir);
+    float3 rayDirection;
     rayDirection.x = sin(phi) * cos(theta);
     rayDirection.y = cos(phi);
     rayDirection.z = sin(phi) * sin(theta);
-    rayDirection = viewRotation *rayDirection;
-
+    rayDirection = (params.viewMatrix * float4(rayDirection, 0)).xyz; // Transform to world space
     
     // Trace path
     float3 color = pathTrace(rayPosition, rayDirection, scene, rngState, frameIndex);
-    
     // Apply gamma correction for display
     color = pow(color, float3(1.0/2.2));
-    
     // Write to output texture
     output.write(float4(color, 1.0), gid);
 }

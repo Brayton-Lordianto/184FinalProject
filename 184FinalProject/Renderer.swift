@@ -226,10 +226,11 @@ actor Renderer {
                                      allocator: metalAllocator)
         
         // MARK: make it a sphere
+        let r = 20.0
         mdlMesh =  MDLMesh.newEllipsoid(
-            withRadii: vector_float3(1, 1, 1), // unit sphere
-            radialSegments: 40,
-            verticalSegments: 40,
+            withRadii: SIMD3<Float>(Float(r), Float(r), Float(r)),
+            radialSegments: 400,
+            verticalSegments: 400,
             geometryType: .triangles,
             inwardNormals: false,
             hemisphere: false,
@@ -536,26 +537,19 @@ actor Renderer {
             // 1. If too much time passed between frames (likely due to head movement)
             // 2. If camera position changed significantly
             // 3. Every 500 samples to prevent numerical issues
-            if timeDelta > 0.5 || sampleCount >= 500 || 
-               (lastCameraPosition != nil && length(currentCameraPosition - lastCameraPosition!) > 0.01) {
+            let cameraPosDiffThreshold: Float = 0.01
+            let sampleCountThreshold: Int = 500
+            if timeDelta > 0.5 || sampleCount > sampleCountThreshold ||
+               (lastCameraPosition != nil && length(currentCameraPosition - lastCameraPosition!) > cameraPosDiffThreshold) {
                 resetAccumulation()
             }
             
             // Update last camera position
             lastCameraPosition = currentCameraPosition
-            
-            // Increment sample count for progressive rendering
             sampleCount += 1
-            
-            // Extract camera position and view matrix
             let cameraPosition = viewMatrix.columns.3.xyz
-            
-            // Get projection info
             let projection = drawable.computeProjection(viewIndex: 0)
-            // Extract vertical field of view from projection matrix (approximate)
             let fovY = 2.0 * atan(1.0 / projection.columns.1.y)
-            
-            // Create parameters for the path tracer
             var params = ComputeParams(
                 time: computeTime,
                 resolution: SIMD2<Float>(Float(outputTexture.width), Float(outputTexture.height)),
@@ -567,6 +561,7 @@ actor Renderer {
             )
             
             // Calculate threads and threadgroups
+            // pretty standard setup for compute shaders
             let threadsPerThreadgroup = MTLSize(width: 16, height: 16, depth: 1)
             let threadgroupCount = MTLSize(
                 width: (outputTexture.width + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
@@ -600,8 +595,6 @@ actor Renderer {
             print("Rendering sample \(sampleCount)")
         }
         
-        MTLAccelerationStructureTriangleGeometryDescriptor()
-
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
         
@@ -613,7 +606,8 @@ actor Renderer {
     // Method to set up and initialize compute components
     private func setupComputeComponents() {
         setupComputePipelines()
-        createComputeOutputTexture(width: 1024, height: 1024)
+        let resolution = 2048
+        createComputeOutputTexture(width: resolution, height: resolution)
     }
     
     func renderLoop() {
