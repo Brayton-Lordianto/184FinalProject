@@ -51,6 +51,11 @@ typedef struct
 typedef struct {
     float time;
     simd_float2 resolution;
+    uint32_t frameIndex;
+    uint32_t sampleCount;
+    simd_float3 cameraPosition;
+    matrix_float4x4 viewMatrix;
+    float fovY;
 } ComputeParams;
 
 

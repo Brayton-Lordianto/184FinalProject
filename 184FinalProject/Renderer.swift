@@ -11,6 +11,8 @@ import MetalKit
 import simd
 import Spatial
 
+
+
 // The 256 byte aligned size of our uniform structure
 let alignedUniformsSize = (MemoryLayout<UniformsArray>.size + 0xFF) & -0x100
 
@@ -78,6 +80,14 @@ actor Renderer {
     let worldTracking: WorldTrackingProvider
     let layerRenderer: LayerRenderer
     let appModel: AppModel
+    
+    var lastCameraPosition: SIMD3<Float>?
+    
+    
+    /*
+     type Sphere
+     let spheres: [Sphere]
+     */
     
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
         self.layerRenderer = layerRenderer
@@ -259,32 +269,78 @@ actor Renderer {
     }
     
     // MARK: compute pipeline
+    private var accumulationTexture: MTLTexture?
+    private var pathTracerOutputTexture: MTLTexture?
+    private var sampleCount: UInt32 = 0
+    private var lastFrameTime: Double = 0
+    private var isMoving: Bool = false
+    
     private func setupComputePipelines() {
         guard let library = device.makeDefaultLibrary() else { return }
         
         // Create compute pipelines for your shaders
         if let function = library.makeFunction(name: "pathTracerCompute") {
             do {
-                let pipeline = try device.makeComputePipelineState(function:
-                                                                    function)
+                let pipeline = try device.makeComputePipelineState(function: function)
+                computePipelines["pathTracerCompute"] = pipeline
                 computePipelines["pathTracerCompute"] = pipeline
             } catch {
                 print("Failed to create compute pipeline for pathTracerCompute: \(error)")
             }
         }
+        
+        // Create accumulation shader pipeline
+        if let function = library.makeFunction(name: "accumulationKernel") {
+            do {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                computePipelines["accumulationKernel"] = pipeline
+            } catch {
+                print("Failed to create compute pipeline for accumulationKernel: \(error)")
+            }
+        }
     }
     
     private func createComputeOutputTexture(width: Int, height: Int) {
-         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-             pixelFormat: .rgba32Float,
-             width: width,
-             height: height,
-             mipmapped: false
-         )
-         descriptor.usage = [.shaderRead, .shaderWrite]
-
-         computeOutputTexture = device.makeTexture(descriptor: descriptor)
-     }
+        // Create three textures with the same descriptor setup
+        let createTexture = { () -> MTLTexture? in
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba32Float,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead, .shaderWrite]
+            return self.device.makeTexture(descriptor: descriptor)
+        }
+        
+        // Create textures
+        computeOutputTexture = createTexture()       // Final output texture shown to the user
+        pathTracerOutputTexture = createTexture()    // Single sample from pathTracer
+        accumulationTexture = createTexture()        // Accumulated results
+        
+        // Reset sample count when creating new textures
+        resetAccumulation()
+    }
+    
+    private func resetAccumulation() {
+        sampleCount = 0
+        print("Resetting accumulation buffer")
+        
+        // Simply create a new texture when resetting instead of clearing the old one
+        // This is more efficient in Metal and avoids synchronization issues
+        guard let accumTexture = accumulationTexture else { return }
+        
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: accumTexture.pixelFormat,
+            width: accumTexture.width,
+            height: accumTexture.height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        
+        // Create a new texture with the same dimensions
+        accumulationTexture = device.makeTexture(descriptor: descriptor)
+    }
     // MARK: ===============
     
     private func updateDynamicBufferState() {
@@ -406,7 +462,7 @@ actor Renderer {
         }
         
         // Run compute pass before render pass
-        dispatchComputeCommands(commandBuffer: commandBuffer)
+        dispatchComputeCommands(commandBuffer: commandBuffer, drawable: drawable, deviceAnchor: deviceAnchor)
         
         /// Final pass rendering code here
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -453,44 +509,98 @@ actor Renderer {
         }
         
         // MARK: Compute Pass
-        func dispatchComputeCommands(commandBuffer: MTLCommandBuffer) {
-            guard let computeEncoder = commandBuffer.makeComputeCommandEncoder(),
+        func dispatchComputeCommands(commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) {
+            guard let pathTracerPipeline = computePipelines["pathTracerCompute"],
+                  let accumulationPipeline = computePipelines["accumulationKernel"],
                   let outputTexture = computeOutputTexture,
-                  let pipeline = computePipelines["pathTracerCompute"] else {
+                  let pathTracerOutput = pathTracerOutputTexture,
+                  let accumTexture = accumulationTexture else {
                 return
             }
             
             // Increment time
             computeTime += Float(1.0/60.0)
             
-            // Create parameters
+            // Get the camera position to check for movement
+            let simdDeviceAnchor = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
+            let view = drawable.views[0]
+            let viewMatrix = (simdDeviceAnchor * view.transform).inverse
+            let currentCameraPosition = viewMatrix.columns.3.xyz
+            
+            // Check if camera moved - reset accumulation if significant movement occurred
+            let currentTime = NSDate().timeIntervalSince1970
+            let timeDelta = currentTime - lastFrameTime
+            lastFrameTime = currentTime
+            
+            // Reset accumulation in certain conditions:
+            // 1. If too much time passed between frames (likely due to head movement)
+            // 2. If camera position changed significantly
+            // 3. Every 500 samples to prevent numerical issues
+            if timeDelta > 0.5 || sampleCount >= 500 || 
+               (lastCameraPosition != nil && length(currentCameraPosition - lastCameraPosition!) > 0.01) {
+                resetAccumulation()
+            }
+            
+            // Update last camera position
+            lastCameraPosition = currentCameraPosition
+            
+            // Increment sample count for progressive rendering
+            sampleCount += 1
+            
+            // Extract camera position and view matrix
+            let cameraPosition = viewMatrix.columns.3.xyz
+            
+            // Get projection info
+            let projection = drawable.computeProjection(viewIndex: 0)
+            // Extract vertical field of view from projection matrix (approximate)
+            let fovY = 2.0 * atan(1.0 / projection.columns.1.y)
+            
+            // Create parameters for the path tracer
             var params = ComputeParams(
                 time: computeTime,
-                resolution: SIMD2<Float>(Float(outputTexture.width),
-                                         Float(outputTexture.height))
+                resolution: SIMD2<Float>(Float(outputTexture.width), Float(outputTexture.height)),
+                frameIndex: UInt32(computeTime * 60) % 10000,
+                sampleCount: sampleCount,
+                cameraPosition: cameraPosition,
+                viewMatrix: viewMatrix,
+                fovY: fovY
             )
-            
-            // Set compute pipeline and parameters
-            computeEncoder.setComputePipelineState(pipeline)
-            computeEncoder.setBytes(&params, length:
-                                        MemoryLayout<ComputeParams>.size, index: 0)
-            computeEncoder.setTexture(outputTexture, index: 0)
             
             // Calculate threads and threadgroups
             let threadsPerThreadgroup = MTLSize(width: 16, height: 16, depth: 1)
             let threadgroupCount = MTLSize(
-                width: (outputTexture.width + threadsPerThreadgroup.width - 1) /
-                threadsPerThreadgroup.width,
-                height: (outputTexture.height + threadsPerThreadgroup.height - 1)
-                / threadsPerThreadgroup.height,
+                width: (outputTexture.width + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
+                height: (outputTexture.height + threadsPerThreadgroup.height - 1) / threadsPerThreadgroup.height,
                 depth: 1
             )
             
-            // Dispatch
-            computeEncoder.dispatchThreadgroups(threadgroupCount,
-                                                threadsPerThreadgroup: threadsPerThreadgroup)
-            computeEncoder.endEncoding()
+            // PASS 1: Path Tracer - generates a single sample
+            guard let pathTracerEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+            pathTracerEncoder.setComputePipelineState(pathTracerPipeline)
+            pathTracerEncoder.setBytes(&params, length: MemoryLayout<ComputeParams>.size, index: 0)
+            pathTracerEncoder.setTexture(pathTracerOutput, index: 0) // Write to the pathTracer output texture
+            pathTracerEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
+            pathTracerEncoder.endEncoding()
+            
+            // PASS 2: Accumulation Pass - combines this sample with previous samples
+            guard let accumEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+            accumEncoder.setComputePipelineState(accumulationPipeline)
+            accumEncoder.setBytes(&sampleCount, length: MemoryLayout<UInt32>.size, index: 0)
+            accumEncoder.setTexture(pathTracerOutput, index: 0)   // Current frame
+            accumEncoder.setTexture(accumTexture, index: 1)       // Accumulated frames
+            accumEncoder.setTexture(outputTexture, index: 2)      // Output for display and next accumulation
+            accumEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
+            accumEncoder.endEncoding()
+            
+            // Also write accumulated result back to accumTexture for next frame
+            guard let copyEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
+            copyEncoder.copy(from: outputTexture, to: accumTexture)
+            copyEncoder.endEncoding()
+            
+            print("Rendering sample \(sampleCount)")
         }
+        
+        MTLAccelerationStructureTriangleGeometryDescriptor()
 
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
@@ -566,5 +676,12 @@ func matrix4x4_scale(_ scaleX: Float, _ scaleY: Float, _ scaleZ: Float) -> matri
 
 func radians_from_degrees(_ degrees: Float) -> Float {
     return (degrees / 180) * .pi
+}
+
+// Extension to extract xyz components from SIMD4
+extension SIMD4 where Scalar == Float {
+    var xyz: SIMD3<Float> {
+        return SIMD3<Float>(x, y, z)
+    }
 }
 
