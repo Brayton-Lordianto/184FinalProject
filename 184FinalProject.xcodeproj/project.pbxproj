@@ -19,17 +19,35 @@
 		41DC11302DAE2635003863ED /* Exceptions for "184FinalProject" folder in "184FinalProject" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				ExampleImplementations/iOSAcceleratedRender.txt,
+				ExampleImplementations/SlowButRealisticRendering.txt,
 				Info.plist,
+				RendererCommented.txt,
+				ShaderTypesCommented.txt,
 			);
 			target = 41DC11182DAE2633003863ED /* 184FinalProject */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+		41F2672E2DC18250005D43AC /* Exceptions for "184FinalProject" folder in "Compile Sources" phase from "184FinalProject" target */ = {
+			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+			buildPhase = 41DC11152DAE2633003863ED /* Sources */;
+			membershipExceptions = (
+				ExampleImplementations/iOSAcceleratedRender.txt,
+				ExampleImplementations/SlowButRealisticRendering.txt,
+				RendererCommented.txt,
+				ShaderTypesCommented.txt,
+			);
+		};
+/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		41DC111B2DAE2633003863ED /* 184FinalProject */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				41DC11302DAE2635003863ED /* Exceptions for "184FinalProject" folder in "184FinalProject" target */,
+				41F2672E2DC18250005D43AC /* Exceptions for "184FinalProject" folder in "Compile Sources" phase from "184FinalProject" target */,
 			);
 			path = 184FinalProject;
 			sourceTree = "<group>";
@@ -123,6 +141,8 @@
 			);
 			mainGroup = 41DC11102DAE2633003863ED;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 41DC111A2DAE2633003863ED /* Products */;
 			projectDirPath = "";
@@ -177,6 +197,7 @@
 				SWIFT_OBJC_BRIDGING_HEADER = "$(TARGET_NAME)/ShaderTypes.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
+				XROS_DEPLOYMENT_TARGET = 2.0;
 			};
 			name = Debug;
 		};
@@ -203,6 +224,7 @@
 				SWIFT_OBJC_BRIDGING_HEADER = "$(TARGET_NAME)/ShaderTypes.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
+				XROS_DEPLOYMENT_TARGET = 2.0;
 			};
 			name = Release;
 		};
