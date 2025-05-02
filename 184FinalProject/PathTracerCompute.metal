@@ -440,93 +440,94 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     uint width = output.get_width();
     uint height = output.get_height();
 
-    // Skip if out of bounds
     if (gid.x >= width || gid.y >= height) {
         return;
     }
-    
-    // Use the frameIndex parameter that's now passed from Swift
-    uint frameIndex = params.frameIndex;
-    //uint sampleCount = params.sampleCount;
 
-    // Initialize Cornell box scene
+    uint frameIndex = params.frameIndex;
+    uint sampleCount = params.sampleCount;
+
+    // Scene setup: Cornell box
     Scene scene = {
-//        .spheres = {
-//            { float3(0, 0, -5), 1.0, half3(0.7, 0.7, 0.7), METAL, 0.1 } // Metallic sphere
-//        },
         .quads = {
-            // Room walls, floor, ceiling
-            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIELECTRIC, 0.0 },  // Back wall (blue)
-            { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2), DIELECTRIC, 0.0 },  // Left wall (red)
-            { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIELECTRIC, 0.0 },  // Right wall (green)
-            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Floor (light gray)
-            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Ceiling (light gray)
-            
-            // Tall box (metallic)
-            { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Front face
-            { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Left face
-            { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Right face
-            { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Back face
-            { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Top face
-            
-            // Short box (glass-like)
-            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Left face
-            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Right face
-            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Back face
-            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(DIELECTRIC, 0.9, 0.9), DIFFUSE, 0.0 },  // Top face
-            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 }   // Bottom face
+            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIELECTRIC, 0.0 },  // Back wall
+            { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2), DIELECTRIC, 0.0 },  // Left wall
+            { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIELECTRIC, 0.0 },  // Right wall
+            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Floor
+            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Ceiling
+
+            // Tall metallic box
+            { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
+            { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
+            { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
+            { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
+            { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
+
+            // Short glass box
+            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },
+            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },
+            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },
+            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIFFUSE, 0.0 },
+            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 }
         },
         .lights = {
-            { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
-            ,{ float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
+            { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
+            { float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
             { float3(-1, 1.9, -2), float3(-1, 1.9, -4.5), float3(1, 1.9, -4.5), half3(1, 1, 1), true, 100.0 }
         }
     };
-    
-    float2 ndc = (float2(gid) + float2(0.5)) / float2(width, height) * 2.0 - 1.0;
-    ndc.y *= -1.0;
-    
-    float aspect = float(width) / float(height);
-    float px = ndc.x * tan(params.fovY * 0.5) * aspect;
-    float py = ndc.y * tan(params.fovY * 0.5);
-    float3 rayDir = normalize(float3(px, py, -1.0));
 
-    // Sample aperture
+    // Jitter for anti-aliasing (Halton)
+    float2 jitter = float2(
+        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
+        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
+    ) / float2(width, height);
+
+    // Convert pixel coordinates to UV [0,1], with Halton jitter for anti-aliasing
+    float2 uv = (float2(gid) + float2(0.5) + jitter) / float2(width, height);
+
+    // Equirectangular ray direction (unit sphere)
+    float theta = uv.x * 2.0 * M_PI_F; // longitude
+    float phi = uv.y * M_PI_F;        // latitude
+    float3 rayDirView;
+    rayDirView.x = sin(phi) * cos(theta);
+    rayDirView.y = cos(phi);
+    rayDirView.z = sin(phi) * sin(theta);
+    
+    // Sample lens position
     uint2 seed = gid * (frameIndex + 1);
     float randR = sqrt(rand(seed));
     float randTheta = 2.0 * M_PI_F * rand(seed);
     float xLens = randR * cos(randTheta);
     float yLens = randR * sin(randTheta);
 
-    // Astigmatism adjustment
+    // Astigmatism phase and eye power
     float t = fmod(randTheta + params.AXIS * M_PI_F / 180.0, M_PI_F);
     float phase = (t < M_PI_F / 2.0) ? t / (M_PI_F / 2.0) : (M_PI_F - t) / (M_PI_F / 2.0);
     float eyePower = params.SPH + params.CYL * phase;
     float adjustedFocalDist = params.focalDistance + 1.0 / eyePower;
 
-    float3 rayOrigin = float3(0.0);
-    float3 focalPoint = rayOrigin + adjustedFocalDist * rayDir;
+    // Compute lens offset and final ray
+    float3 focalPoint = float3(0.0) + adjustedFocalDist * rayDirView;
     float3 lensOffset = float3(xLens * params.lensRadius, yLens * params.lensRadius, 0.0);
-    float3 newOrigin = rayOrigin + lensOffset;
-    rayDir = normalize(focalPoint - newOrigin);
+    float3 rayOriginView = float3(0.0) + lensOffset;
+    float3 rayDirFinal = normalize(focalPoint - rayOriginView);
 
     // Transform to world space
-    float4 originWS4 = params.viewMatrix * float4(newOrigin, 1.0);
-    float4 dirWS4 = params.viewMatrix * float4(rayDir, 0.0);
-    float3 originWS = originWS4.xyz;
-    float3 dirWS = normalize(dirWS4.xyz);
-
-    // Initialize RNG seed - ensure variation across pixels and frames
-    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + frameIndex * 26699) | 1;
-
-    float3 color = pathTrace(originWS, dirWS, scene, rngState, frameIndex);
+    float3 rayPosition = (params.viewMatrix * float4(rayOriginView, 1.0)).xyz;
+    float3 rayDirection = normalize((params.viewMatrix * float4(rayDirFinal, 0.0)).xyz);
     
-    // Apply gamma correction (for display)
+    // RNG and path tracing
+    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + frameIndex * 26699) | 1;
+    float3 color = pathTrace(rayPosition, rayDirection, scene, rngState, frameIndex);
+
+    // Gamma correction and output
     color = pow(color, float3(1.0 / 2.2));
-    // Write to output texture
     if (length(color) > 0.0001) {
         output.write(float4(color, 1.0), gid);
     }
+
+
 
 //    // Initialize RNG seed - add spatial and temporal variation
 //    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
