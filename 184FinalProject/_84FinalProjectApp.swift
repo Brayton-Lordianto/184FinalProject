@@ -36,7 +36,11 @@ struct _84FinalProjectTestApp: App {
 
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
             CompositorLayer(configuration: ContentStageConfiguration()) { @MainActor layerRenderer in
-                Renderer.startRenderLoop(layerRenderer, appModel: appModel)
+                if appModel.rendererMode == .tileBased {
+                    TileBasedRenderer.startRenderLoop(layerRenderer, appModel: appModel)
+                } else {
+                    Renderer.startRenderLoop(layerRenderer, appModel: appModel)
+                }
             }
         }
         .immersionStyle(selection: .constant(.full), in: .full)
