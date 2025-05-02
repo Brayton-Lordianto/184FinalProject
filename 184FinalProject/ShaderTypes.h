@@ -56,6 +56,7 @@ typedef struct {
     simd_float3 cameraPosition;
     matrix_float4x4 viewMatrix;
     float fovY;
+    uint32_t modelTriangleCount; // Number of active model triangles
 } ComputeParams;
 
 

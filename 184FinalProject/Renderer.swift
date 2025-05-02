@@ -83,15 +83,54 @@ actor Renderer {
     
     var lastCameraPosition: SIMD3<Float>?
     
-    
+    let obj: Model?
     /*
      type Sphere
      let spheres: [Sphere]
      */
     
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
-        self.layerRenderer = layerRenderer
         self.device = layerRenderer.device
+
+        // MARK: load up your meshes
+        /* E.G.
+         let textureLoader = MTKTextureLoader(device: self.device)
+         let sponzaURL = Bundle.main.url(forResource: "Sponza_Scene", withExtension: "usdz")!
+         self.sponzaModel = Model()
+         self.sponzaModel?.scale = simd_float3(repeating: 0.004)
+         self.sponzaModel?.loadModel(device: device, url: sponzaURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
+         */
+        struct Vertex {
+            var position: simd_float3
+            var texCoord: simd_float2
+            var normal: simd_float3
+        }
+        let vertexDescriptor = MTLVertexDescriptor()
+        vertexDescriptor.layouts[30].stride = MemoryLayout<Vertex>.stride
+        vertexDescriptor.layouts[30].stepRate = 1
+        vertexDescriptor.layouts[30].stepFunction = MTLVertexStepFunction.perVertex
+
+        vertexDescriptor.attributes[0].format = MTLVertexFormat.float3
+        vertexDescriptor.attributes[0].offset = MemoryLayout.offset(of: \Vertex.position)!
+        vertexDescriptor.attributes[0].bufferIndex = 30
+
+        vertexDescriptor.attributes[1].format = MTLVertexFormat.float2
+        vertexDescriptor.attributes[1].offset = MemoryLayout.offset(of: \Vertex.texCoord)!
+        vertexDescriptor.attributes[1].bufferIndex = 30
+        
+        vertexDescriptor.attributes[2].format = MTLVertexFormat.float3
+        vertexDescriptor.attributes[2].offset = MemoryLayout.offset(of: \Vertex.normal)!
+        vertexDescriptor.attributes[2].bufferIndex = 30
+        let textureLoader = MTKTextureLoader(device: layerRenderer.device)
+        let cornellURL = Bundle.main.url(forResource: "Cornell_Box", withExtension: "usdz")!
+        self.obj = Model()
+        self.obj?.loadModel(device: device, url: cornellURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
+        print(obj?.meshes[0].mesh.vertexCount)
+        print(obj?.meshes[1].mesh.vertexCount)
+        // MARK: END
+        
+        
+        self.layerRenderer = layerRenderer
         self.commandQueue = self.device.makeCommandQueue()!
         self.appModel = appModel
         
