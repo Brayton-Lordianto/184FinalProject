@@ -1,30 +1,41 @@
 // MARK: adapted from https://github.com/SamoZ256/MetalTutorial/blob/main/MetalTutorial7/MetalTutorial/Model.swift
 import MetalKit
 
+func getMaterial(_ mdlSubmesh: MDLSubmesh) -> Material {
+    let materialName = mdlSubmesh.material?.name ?? "No Material"
+    let baseColor = mdlSubmesh.material?.property(with: .baseColor)?.float3Value ?? float3(1.0)
+    let roughness = mdlSubmesh.material?.property(with: .roughness)?.floatValue ?? 1.0
+    let indexOfRefraction = mdlSubmesh.material?.property(with: .materialIndexOfRefraction)?.floatValue ?? 1.0
+    let emission = mdlSubmesh.material?.property(with: .emission)?.float3Value ?? float3(0.0)
+    let metallic = mdlSubmesh.material?.property(with: .metallic)?.floatValue ?? 0.0
+    var material = Material()
+    
+    // determine type of material
+    if indexOfRefraction > 1.2 {
+        // IOR > 1.0, likely a dielectric (glass, water, etc.)
+        material.materialType = MaterialType.dielectric.rawValue
+    } else if metallic > 0.5 {
+        // If it has high metalness value, classify as metal
+        material.materialType = MaterialType.metal.rawValue
+    } else {
+        // Default to diffuse for all other materials
+        material.materialType = MaterialType.diffuse.rawValue
+    }
+    
+    // other properties
+    material.color = simd_half3(Float16(baseColor.x), Float16(baseColor.y), Float16(baseColor.z))
+    material.isLightSource = emission.x > 0.0 || emission.y > 0.0 || emission.z > 0.0
+    material.intensity = max(emission.x, max(emission.y, emission.z))
+    material.roughness = roughness
+    return material
+}
+
 struct Material {
-    var diffuseTexture: MTLTexture?
-    var specularTexture: MTLTexture?
-    
-    static var textureMap: [MDLTexture?: MTLTexture?] = [:]
-    
-    init(mdlMaterial: MDLMaterial?, textureLoader: MTKTextureLoader) {
-        self.diffuseTexture  = loadTexture(.baseColor, mdlMaterial: mdlMaterial, textureLoader: textureLoader)
-        self.specularTexture = loadTexture(.specular,  mdlMaterial: mdlMaterial, textureLoader: textureLoader)
-    }
-    
-    func loadTexture(_ semantic: MDLMaterialSemantic, mdlMaterial: MDLMaterial?, textureLoader: MTKTextureLoader) -> MTLTexture? {
-        guard let materialProperty = mdlMaterial?.property(with: semantic) else { return nil }
-        guard let sourceTexture = materialProperty.textureSamplerValue?.texture else { return nil }
-        
-        if let texture = Material.textureMap[sourceTexture] {
-            return texture
-        }
-        
-        let texture = try? textureLoader.newTexture(texture: sourceTexture, options: nil)
-        Material.textureMap[sourceTexture] = texture
-        
-        return texture
-    }
+    var color: simd_half3 = simd_half3(0.7, 0.7, 0.7)
+    var isLightSource: Bool = false
+    var intensity: Float = 0.0
+    var materialType: Int = 0
+    var roughness: Float = 0.5
 }
 
 class Mesh {
@@ -64,8 +75,8 @@ class Model {
         let bufferAllocator = MTKMeshBufferAllocator(device: device)
         let asset = MDLAsset(url: url, vertexDescriptor: modelVertexDescriptor, bufferAllocator: bufferAllocator)
         
-        // Load data for textures
-        asset.loadTextures()
+        // Load data for textures - - we won't support textures for now.
+        // asset.loadTextures()
         
         // Retrieve the meshes
         guard let (mdlMeshes, mtkMeshes) = try? MTKMesh.newMeshes(asset: asset, device: device) else {
@@ -79,7 +90,7 @@ class Model {
         for (mdlMesh, mtkMesh) in zip(mdlMeshes, mtkMeshes) {
             var materials = [Material]()
             for mdlSubmesh in mdlMesh.submeshes as! [MDLSubmesh] {
-                let material = Material(mdlMaterial: mdlSubmesh.material, textureLoader: textureLoader)
+                let material = getMaterial(mdlSubmesh)
                 materials.append(material)
             }
             let mesh = Mesh(mesh: mtkMesh, materials: materials)
@@ -100,10 +111,6 @@ class Model {
             let vertexBuffer = mesh.mesh.vertexBuffers[0]
             renderEncoder.setVertexBuffer(vertexBuffer.buffer, offset: vertexBuffer.offset, index: 30)
             for (submesh, material) in zip(mesh.mesh.submeshes, mesh.materials) {
-                // Bind textures
-                renderEncoder.setFragmentTexture(material.diffuseTexture, index: 0)
-                renderEncoder.setFragmentTexture(material.specularTexture, index: 1)
-                
                 // Draw
                 let indexBuffer = submesh.indexBuffer
                 renderEncoder.drawIndexedPrimitives(type: MTLPrimitiveType.triangle, indexCount: submesh.indexCount, indexType: submesh.indexType, indexBuffer: indexBuffer.buffer, indexBufferOffset: 0)

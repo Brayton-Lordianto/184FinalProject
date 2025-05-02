@@ -43,15 +43,12 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                texture2d<float> computeTexture [[ texture(TextureIndexCompute) ]],
                                texture2d<half> colorMap     [[ texture(TextureIndexColor) ]])
 {
-    // MARK: test compute shader
     float4 computeColor = computeTexture.sample(sampler(filter::linear),
       in.texCoord);
-//    return computeColor;
-    // if color is black,
     if (computeColor.r == 0.0 && computeColor.g == 0.0 && computeColor.b == 0.0)
     {
         discard_fragment();
     }
     return computeColor;
-    // MARK: end test compute shader
+    // MARK: end compute shader
 }

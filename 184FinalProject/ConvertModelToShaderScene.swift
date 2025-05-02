@@ -66,53 +66,26 @@ struct GPUTriangle {
 
 func convertModelToShaderScene(model: Model) -> [Triangle] {
     var triangles = [Triangle]()
-    
-    print("🔄 Starting model conversion to shader scene")
-    print("📊 Model has \(model.meshes.count) meshes")
-    
-    // Apply model transformation
     var modelMatrix = matrix_identity_float4x4
     translateMatrix(matrix: &modelMatrix, position: model.position)
     rotateMatrix(matrix: &modelMatrix, rotation: toRadians(from: model.rotation))
     scaleMatrix(matrix: &modelMatrix, scale: model.scale)
     
     for (meshIndex, mesh) in model.meshes.enumerated() {
-        print("📐 Processing mesh #\(meshIndex)")
-        
-        // Note: Using buffer index 30 as specified in your vertex descriptor
+        // Note: Using buffer index 30 as specified in vertex descriptor
         if mesh.mesh.vertexBuffers.count <= 0 {
             print("⚠️ No vertex buffers found for mesh #\(meshIndex)")
             continue
         }
-        
         let vertexBuffer = mesh.mesh.vertexBuffers[0]
-        print("🔢 Vertex buffer size: \(vertexBuffer.buffer.length), offset: \(vertexBuffer.offset)")
-        
         // This is critical - the stride is the size of your Vertex struct
         let vertexStride = MemoryLayout<Vertex>.stride
-        print("🔍 Vertex stride: \(vertexStride) bytes")
-        
         // Get raw vertex data
         let vertexData = vertexBuffer.buffer.contents()
         
-        print("🧩 Mesh has \(mesh.mesh.submeshes.count) submeshes")
         for (submeshIndex, submesh) in mesh.mesh.submeshes.enumerated() {
-            print("   ⬢ Processing submesh #\(submeshIndex) with \(submesh.indexCount) indices")
-            
-            
-            // Get material
             let material = mesh.materials[submeshIndex]
-            print("   🎨 Material: \(material)")
-            
-            // Extract color from material - simplistic approach
-            let color = simd_half3(0.7, 0.7, 0.7) // Default color
-            
-            // Get index buffer data
             let indexData = submesh.indexBuffer.buffer.contents()
-            
-            // Print submesh triangle count
-            let triangleCount = submesh.indexCount / 3
-            print("   📐 Submesh triangle count: \(triangleCount)")
             
             // Process triangles
             for i in stride(from: 0, to: submesh.indexCount, by: 3) {
@@ -141,49 +114,22 @@ func convertModelToShaderScene(model: Model) -> [Triangle] {
                     vertices[j] = transformedPosition + SIMD3<Float>(0, 0, -5)
                 }
                 
-                // Create triangle with randomly assigned materials for testing
-                let materialType: MaterialType
-                let roughness: Float
-                
-                // Randomly assign different materials for testing
-                switch (triangles.count % 3) {
-                case 0:
-                    materialType = .diffuse
-                    roughness = 0.1
-                case 1:
-                    materialType = .metal
-                    roughness = 0.3
-                case 2:
-                    materialType = .dielectric
-                    roughness = 0.0
-                default:
-                    materialType = .diffuse
-                    roughness = 0.5
-                }
-                
                 let triangle = Triangle(
                     p1: vertices[0],
                     p2: vertices[1],
                     p3: vertices[2],
-                    color: color,
-                    isLightSource: false,
-                    intensity: 0.0,
-                    material: materialType,
-                    roughness: roughness
+                    color: material.color,
+                    isLightSource: material.isLightSource,
+                    intensity: material.intensity,
+                    material: MaterialType(rawValue: material.materialType) ?? .dielectric,
+                    roughness: material.roughness
                 )
-                
-                // Only print first and last triangle of each submesh to avoid log spam
-                if i == 0 || i >= submesh.indexCount - 3 {
-                    print("   🔺 Triangle \(i/3) - Vertices: \(triangle.p1), \(triangle.p2), \(triangle.p3)")
-                    print("      💠 Material: \(materialType), Roughness: \(roughness)")
-                }
                 
                 triangles.append(triangle)
             }
         }
     }
     
-    print("✅ Conversion complete. Generated \(triangles.count) triangles for shader")
     return triangles
 }
 
