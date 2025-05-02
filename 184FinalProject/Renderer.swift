@@ -11,6 +11,11 @@ import MetalKit
 import simd
 import Spatial
 
+struct Vertex {
+    var position: simd_float3
+    var texCoord: simd_float2
+    var normal: simd_float3
+}
 
 
 // The 256 byte aligned size of our uniform structure
@@ -100,11 +105,6 @@ actor Renderer {
          self.sponzaModel?.scale = simd_float3(repeating: 0.004)
          self.sponzaModel?.loadModel(device: device, url: sponzaURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
          */
-        struct Vertex {
-            var position: simd_float3
-            var texCoord: simd_float2
-            var normal: simd_float3
-        }
         let vertexDescriptor = MTLVertexDescriptor()
         vertexDescriptor.layouts[30].stride = MemoryLayout<Vertex>.stride
         vertexDescriptor.layouts[30].stepRate = 1
@@ -122,11 +122,11 @@ actor Renderer {
         vertexDescriptor.attributes[2].offset = MemoryLayout.offset(of: \Vertex.normal)!
         vertexDescriptor.attributes[2].bufferIndex = 30
         let textureLoader = MTKTextureLoader(device: layerRenderer.device)
-        let cornellURL = Bundle.main.url(forResource: "Cornell_Box", withExtension: "usdz")!
+        let cornellURL = Bundle.main.url(forResource: "Cornell_Box_2", withExtension: "usdz")!
         self.obj = Model()
-        self.obj?.loadModel(device: device, url: cornellURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
-        print(obj?.meshes[0].mesh.vertexCount)
-        print(obj?.meshes[1].mesh.vertexCount)
+        self.obj!.loadModel(device: device, url: cornellURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
+        let triangles = convertModelToShaderScene(model: self.obj!)
+        print(triangles.count)
         // MARK: END
         
         
@@ -596,7 +596,8 @@ actor Renderer {
                 sampleCount: sampleCount,
                 cameraPosition: cameraPosition,
                 viewMatrix: viewMatrix,
-                fovY: fovY
+                fovY: fovY,
+                modelTriangleCount: UInt32(mesh.submeshes.count),
             )
             
             // Calculate threads and threadgroups
@@ -612,7 +613,7 @@ actor Renderer {
             guard let pathTracerEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
             pathTracerEncoder.setComputePipelineState(pathTracerPipeline)
             pathTracerEncoder.setBytes(&params, length: MemoryLayout<ComputeParams>.size, index: 0)
-            pathTracerEncoder.setTexture(pathTracerOutput, index: 0) // Write to the pathTracer output texture
+            pathTracerEncoder.setTexture(pathTracerOutput, index: 0)
             pathTracerEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
             pathTracerEncoder.endEncoding()
             
@@ -620,13 +621,13 @@ actor Renderer {
             guard let accumEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
             accumEncoder.setComputePipelineState(accumulationPipeline)
             accumEncoder.setBytes(&sampleCount, length: MemoryLayout<UInt32>.size, index: 0)
-            accumEncoder.setTexture(pathTracerOutput, index: 0)   // Current frame
-            accumEncoder.setTexture(accumTexture, index: 1)       // Accumulated frames
-            accumEncoder.setTexture(outputTexture, index: 2)      // Output for display and next accumulation
+            accumEncoder.setTexture(pathTracerOutput, index: 0)
+            accumEncoder.setTexture(accumTexture, index: 1)
+            accumEncoder.setTexture(outputTexture, index: 2)
             accumEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
             accumEncoder.endEncoding()
             
-            // Also write accumulated result back to accumTexture for next frame
+            // accumulated result for next frame
             guard let copyEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
             copyEncoder.copy(from: outputTexture, to: accumTexture)
             copyEncoder.endEncoding()
