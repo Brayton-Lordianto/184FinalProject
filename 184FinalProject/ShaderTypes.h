@@ -58,14 +58,18 @@ typedef enum {
 
 // Triangle structure matching Swift side
 typedef struct {
-    packed_float3 p1;
-    packed_float3 p2;
-    packed_float3 p3;
-    packed_half3 color;
-    bool isLightSource;
-    float intensity;
-    int materialType;
-    float roughness;
+    packed_float3 p1;       // 12 bytes
+    float _padding0;        // 4 bytes (padding to align to 16 bytes)
+    packed_float3 p2;       // 12 bytes
+    float _padding1;        // 4 bytes
+    packed_float3 p3;       // 12 bytes
+    float _padding2;        // 4 bytes
+    packed_half3 color;     // 6 bytes
+    float _padding3;        // 4 byttes
+    bool isLightSource;     // 1 byte
+    float intensity;        // 4 bytes
+    int materialType;       // 4 bytes
+    float roughness;        // 4 bytes
 } GPUTriangle;
 #endif
 
