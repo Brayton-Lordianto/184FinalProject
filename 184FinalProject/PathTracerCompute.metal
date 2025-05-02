@@ -16,20 +16,16 @@ using namespace metal;
 #define SHADOW_BIAS 0.001f
 #define SUPER_FAR 1000000.0
 
-// Scene constants
+// Scene constants - still needed for hardcoded elements
 #define NUM_SPHERES 1
 #define NUM_QUADS 15
 #define NUM_LIGHTS 3
 
+// Maximum model triangles - upper limit we'll support
+#define MAX_MODEL_TRIANGLES 1
+
 // Halton sequence primes for better sampling
 constant unsigned int primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
-
-// Material properties
-enum MaterialType {
-    DIFFUSE = 0,
-    METAL = 1,
-    DIELECTRIC = 2
-};
 
 typedef struct RayHit {
     bool hit = false;
@@ -68,6 +64,7 @@ typedef struct {
     Sphere spheres[NUM_SPHERES];
     Quad quads[NUM_QUADS];
     Triangle lights[NUM_LIGHTS];
+    // The model triangles will be passed separately via a buffer
 } Scene;
 
 // RNG functions
@@ -244,8 +241,21 @@ RayHit rayQuadIntersect(float3 rayOrigin, float3 rayDirection, Quad quad) {
     return noHit;
 }
 
+// Convert GPUTriangle to a Triangle for internal use
+Triangle convertGPUTriangle(GPUTriangle gpuTriangle) {
+    Triangle tri;
+    tri.p1 = gpuTriangle.p1;
+    tri.p2 = gpuTriangle.p2;
+    tri.p3 = gpuTriangle.p3;
+    tri.color = gpuTriangle.color;
+    tri.isLightSource = gpuTriangle.isLightSource;
+    tri.intensity = gpuTriangle.intensity;
+    return tri;
+}
+
 // Find the closest hit in the scene
-RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene) {
+RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene, 
+                   constant GPUTriangle* modelTriangles, uint modelTriangleCount) {
     RayHit closestHit;
     closestHit.hit = false;
     closestHit.dist = SUPER_FAR;
@@ -286,24 +296,53 @@ RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene) {
         }
     }
     
+    // Check intersections with model triangles
+    for (uint i = 0; i < modelTriangleCount; i++) {
+        GPUTriangle gpuTriangle = modelTriangles[i];
+        
+        // Skip degenerate triangles
+        if (length(gpuTriangle.p1) + length(gpuTriangle.p2) + length(gpuTriangle.p3) <= 0.0) continue;
+        
+        // Convert to internal triangle for intersection
+        Triangle triangle;
+        triangle.p1 = gpuTriangle.p1;
+        triangle.p2 = gpuTriangle.p2;
+        triangle.p3 = gpuTriangle.p3;
+        triangle.color = gpuTriangle.color;
+        triangle.isLightSource = gpuTriangle.isLightSource;
+        triangle.intensity = gpuTriangle.intensity;
+        
+        RayHit hit = rayTriangleIntersect(rayPosition, rayDirection, triangle);
+        
+        // If we hit, set properties based on GPU triangle
+        if (hit.hit && hit.dist < closestHit.dist && hit.dist > 0) {
+            // Update material properties based on model data
+            hit.material = (MaterialType)gpuTriangle.materialType;
+            hit.roughness = gpuTriangle.roughness;
+            closestHit = hit;
+        }
+    }
+    
     return closestHit;
 }
 
 // Shadow test - returns true if point is in shadow
-bool isInShadow(float3 point, float3 lightDir, float lightDistance, Scene scene) {
+bool isInShadow(float3 point, float3 lightDir, float lightDistance, Scene scene, 
+               constant GPUTriangle* modelTriangles, uint modelTriangleCount) {
     // Add bias to avoid self-intersection
     float3 shadowRayOrigin = point + lightDir * SHADOW_BIAS;
     
     // Simple shadow check against all objects
-    RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene);
+    RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene, modelTriangles, modelTriangleCount);
     // hit.emission trick so if its a light it should output false
     return (length(hit.emission) <= 0) * hit.hit;
 }
     
 // do it like this so no control flow needed.
-float shadowFactor(float3 point, float3 lightDir, float lightDistance, Scene scene) {
+float shadowFactor(float3 point, float3 lightDir, float lightDistance, Scene scene, 
+                  constant GPUTriangle* modelTriangles, uint modelTriangleCount) {
     float3 shadowRayOrigin = point + lightDir * SHADOW_BIAS;
-    RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene);
+    RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene, modelTriangles, modelTriangleCount);
     // Return 0.0 when in shadow, 1.0 when not in shadow
     return 1.0 - float(hit.hit && length(hit.emission) <= 0);
 }
@@ -362,7 +401,9 @@ float3 sampleDirection(float3 inDir, float3 normal, MaterialType materialType,
 }
 
 // The main path tracing function
-float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint& rng, uint frameIndex) {
+float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, 
+                constant GPUTriangle* modelTriangles, uint modelTriangleCount,
+                thread uint& rng, uint frameIndex) {
     float3 finalColor = float3(0.0);
     float3 throughput = float3(1.0);
     float3 rayPos = rayOrigin;
@@ -370,7 +411,7 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
     
     // Loop for multiple bounces
     for (int bounce = 0; bounce <= MAX_BOUNCES; ++bounce) {
-        RayHit hit = rayTraceHit(rayPos, rayDir, scene);
+        RayHit hit = rayTraceHit(rayPos, rayDir, scene, modelTriangles, modelTriangleCount);
         // If no hit, add background contribution and break
         if (!hit.hit || hit.dist >= SUPER_FAR) {
             break;
@@ -395,7 +436,7 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
                 float3 lightPos = sampleLightSource(light, rng);
                 float3 lightDir = normalize(lightPos - hitPoint);
                 float lightDistance = length(lightPos - hitPoint);
-                float shadow = shadowFactor(hitPoint, lightDir, lightDistance, scene);
+                float shadow = shadowFactor(hitPoint, lightDir, lightDistance, scene, modelTriangles, modelTriangleCount);
                 float3 brdf = evaluateBRDF(-rayDir, lightDir, hit.normal, hit.albedo,
                                            hit.material, hit.roughness);
                 float cos_theta = abs(dot(hit.normal, lightDir));
@@ -428,6 +469,7 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
 // Standard compute shader path tracing implementation (original)
 kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0)]],
                              constant ComputeParams &params [[buffer(0)]],
+                             constant GPUTriangle* modelTriangles [[buffer(1)]],
                              uint2 gid [[thread_position_in_grid]]) {
     // Get dimensions
     uint width = output.get_width();
@@ -440,13 +482,13 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     
     // Use the frameIndex parameter that's now passed from Swift
     uint frameIndex = params.frameIndex;
-    uint sampleCount = params.sampleCount;
+    uint modelTriangleCount = params.modelTriangleCount;
 
     // Initialize Cornell box scene
+    // Most of this scene is now just for reference and can be commented out
+    // as we'll rely on model triangles passed from Swift
     Scene scene = {
-//        .spheres = {
-//            { float3(0, 0, -5), 1.0, half3(0.7, 0.7, 0.7), METAL, 0.1 } // Metallic sphere
-//        },
+        /* Comment out
         .quads = {
             // Room walls, floor, ceiling
             { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIELECTRIC, 0.0 },  // Back wall (blue)
@@ -469,6 +511,9 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
             { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(DIELECTRIC, 0.9, 0.9), DIFFUSE, 0.0 },  // Top face
             { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 }   // Bottom face
         },
+        */
+        
+        // Always include lights for illumination
         .lights = {
             { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
             ,{ float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
@@ -497,270 +542,13 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     rayDirection.z = sin(phi) * sin(theta);
     rayDirection = (params.viewMatrix * float4(rayDirection, 0)).xyz; // Transform to world space
     
-    // Trace path
-    float3 color = pathTrace(rayPosition, rayDirection, scene, rngState, frameIndex);
+    // Trace path with model triangles
+    float3 color = pathTrace(rayPosition, rayDirection, scene, modelTriangles, modelTriangleCount, rngState, frameIndex);
+    
     // Apply gamma correction for display
     color = pow(color, float3(1.0/2.2));
+    
     // Write to output texture
-    // if not black
-//    if (length(color) > 0.0001) {
     output.write(float4(color, 1.0), gid);
-//    }
 }
 
-// Constants for tile size
-//#define TILE_SIZE 16
-//#define MAX_TRIANGLES_IN_TILE 32
-//#define MAX_QUADS_IN_TILE 32
-//#define THREADGROUP_MEMORY_SIZE 16384
-//
-//// Struct to hold scene elements visible to a specific tile
-//typedef struct {
-//    Triangle triangles[MAX_TRIANGLES_IN_TILE];
-//    Quad quads[MAX_QUADS_IN_TILE];
-//    uint triangleCount;
-//    uint quadCount;
-//} TileVisibleScene;
-//
-//// Test if a triangle potentially intersects a tile's frustum
-//bool triangleIntersectsTile(Triangle triangle, float3 tileCenter, float tileSize, float viewDistance) {
-//    // Simple bounding sphere test for triangle
-//    float3 triangleCenter = (triangle.p1 + triangle.p2 + triangle.p3) / 3.0;
-//    float triangleRadius = max(max(length(triangle.p1 - triangleCenter), 
-//                                 length(triangle.p2 - triangleCenter)),
-//                             length(triangle.p3 - triangleCenter));
-//    
-//    // Approximate tile as a sphere for quick test
-//    float distance = length(triangleCenter - tileCenter);
-//    
-//    // If triangle center is behind camera, still include if it's a light
-//    if (dot(triangleCenter - tileCenter, normalize(tileCenter)) < 0 && !triangle.isLightSource) {
-//        return false;
-//    }
-//    
-//    // Include triangle if it's close enough or is a light source (always include lights)
-//    return triangle.isLightSource || (distance < (tileSize + triangleRadius + viewDistance));
-//}
-//
-//// Test if a quad potentially intersects a tile's frustum
-//bool quadIntersectsTile(Quad quad, float3 tileCenter, float tileSize, float viewDistance) {
-//    // Simple bounding sphere test for quad
-//    float3 quadCenter = (quad.p0 + quad.p1 + quad.p2 + quad.p3) / 4.0;
-//    float quadRadius = max(max(max(length(quad.p0 - quadCenter), 
-//                               length(quad.p1 - quadCenter)),
-//                           length(quad.p2 - quadCenter)),
-//                       length(quad.p3 - quadCenter));
-//    
-//    // Approximate tile as a sphere for quick test
-//    float distance = length(quadCenter - tileCenter);
-//    
-//    // If quad center is behind camera, don't include it
-//    if (dot(quadCenter - tileCenter, normalize(tileCenter)) < 0) {
-//        return false;
-//    }
-//    
-//    // Include quad if it's close enough
-//    return (distance < (tileSize + quadRadius + viewDistance));
-//}
-//
-//// Tile-based path tracing implementation
-//kernel void tilePathTracerCompute(
-//    texture2d<float, access::write> output [[texture(0)]],
-//    constant ComputeParams &params [[buffer(0)]],
-//    uint2 gid [[thread_position_in_grid]],
-//    uint2 tid [[thread_position_in_threadgroup]],
-//    uint2 blockIdx [[threadgroup_position_in_grid]]
-//) {
-//    // Define tile dimensions
-//    const uint TILE_WIDTH = TILE_SIZE;
-//    const uint TILE_HEIGHT = TILE_SIZE;
-//    
-//    // Get dimensions
-//    uint width = output.get_width();
-//    uint height = output.get_height();
-//    
-//    // Skip if out of bounds
-//    if (gid.x >= width || gid.y >= height) {
-//        return;
-//    }
-//    
-//    // Calculate tile-specific parameters
-//    uint frameIndex = params.frameIndex;
-//    uint sampleCount = params.sampleCount;
-//    float tileSize = max(float(TILE_WIDTH) / float(width), float(TILE_HEIGHT) / float(height));
-//    
-//    // Create space for visible scene elements to this tile
-//    threadgroup TileVisibleScene tileScene;
-//    
-//    // Only initialize the tile data once per tile (by the first thread)
-//    if (tid.x == 0 && tid.y == 0) {
-//        tileScene.triangleCount = 0;
-//        tileScene.quadCount = 0;
-//    }
-//    
-//    // Ensure all threads see the initialization
-//    threadgroup_barrier(mem_flags::mem_threadgroup);
-//    
-//    // Calculate tile center position in world space
-//    float2 tileCenterUV = float2(
-//        float(blockIdx.x * TILE_WIDTH + TILE_WIDTH/2) / float(width),
-//        float(blockIdx.y * TILE_HEIGHT + TILE_HEIGHT/2) / float(height)
-//    );
-//    
-//    // Convert to ray direction to get a center viewing direction for this tile
-//    float tileCenterTheta = tileCenterUV.x * 2.0 * M_PI_F;
-//    float tileCenterPhi = tileCenterUV.y * M_PI_F;
-//    float3 tileCenterDir;
-//    tileCenterDir.x = sin(tileCenterPhi) * cos(tileCenterTheta);
-//    tileCenterDir.y = cos(tileCenterPhi);
-//    tileCenterDir.z = sin(tileCenterPhi) * sin(tileCenterTheta);
-//    tileCenterDir = (params.viewMatrix * float4(tileCenterDir, 0)).xyz;
-//    
-//    // Define the full scene (same as original pathTracer)
-//    Scene fullScene = {
-//        .quads = {
-//            // Room walls, floor, ceiling
-//            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIELECTRIC, 0.0 },  // Back wall (blue)
-//            { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2), DIELECTRIC, 0.0 },  // Left wall (red)
-//            { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIELECTRIC, 0.0 },  // Right wall (green)
-//            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), DIELECTRIC, 0.0 },  // Floor (light gray)
-//            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), DIELECTRIC, 0.0 },  // Ceiling (light gray)
-//            
-//            // Tall box (metallic)
-//            { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Front face
-//            { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Left face
-//            { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Right face
-//            { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Back face
-//            { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Top face
-//            
-//            // Short box (glass-like)
-//            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Front face
-//            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Left face
-//            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Right face
-//            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Back face
-//            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Top face
-//        },
-//        .triangles = {
-//            { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
-//            { float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
-//        }
-//    };
-//    
-//    // Let each thread in the tile help with scene culling
-//    // Distribute quads among threads in the tile
-//    uint totalQuads = NUM_QUADS;
-//    uint quadsPerThread = (totalQuads + TILE_WIDTH * TILE_HEIGHT - 1) / (TILE_WIDTH * TILE_HEIGHT);
-//    uint quadStart = (tid.y * TILE_WIDTH + tid.x) * quadsPerThread;
-//    uint quadEnd = min(quadStart + quadsPerThread, totalQuads);
-//    
-//    // Cull quads visible to this tile
-//    for (uint i = quadStart; i < quadEnd; i++) {
-//        if (i < NUM_QUADS) {
-//            Quad quad = fullScene.quads[i];
-//            
-//            // Check if this quad potentially intersects with this tile's view frustum
-//            if (quadIntersectsTile(quad, params.cameraPosition, tileSize, 10.0f)) {
-//                // Add to the tile's visible objects
-//                uint index = atomic_fetch_add_explicit(&tileScene.quadCount, 1, memory_order_relaxed);
-//                if (index < MAX_QUADS_IN_TILE) {
-//                    tileScene.quads[index] = quad;
-//                }
-//            }
-//        }
-//    }
-//    
-//    // Distribute triangles among threads in the tile
-//    uint totalTriangles = NUM_LIGHTS;
-//    uint trianglesPerThread = (totalTriangles + TILE_WIDTH * TILE_HEIGHT - 1) / (TILE_WIDTH * TILE_HEIGHT);
-//    uint triangleStart = (tid.y * TILE_WIDTH + tid.x) * trianglesPerThread;
-//    uint triangleEnd = min(triangleStart + trianglesPerThread, totalTriangles);
-//    
-//    // Cull triangles visible to this tile (always include light sources)
-//    for (uint i = triangleStart; i < triangleEnd; i++) {
-//        if (i < NUM_LIGHTS) {
-//            Triangle triangle = fullScene.triangles[i];
-//            
-//            // Light sources should always be included
-//            if (triangle.isLightSource || 
-//                triangleIntersectsTile(triangle, params.cameraPosition, tileSize, 10.0f)) {
-//                // Add to the tile's visible objects
-//                uint index = atomic_fetch_add_explicit(&tileScene.triangleCount, 1, memory_order_relaxed);
-//                if (index < MAX_TRIANGLES_IN_TILE) {
-//                    tileScene.triangles[index] = triangle;
-//                }
-//            }
-//        }
-//    }
-//    
-//    // Wait for all threads to finish culling
-//    threadgroup_barrier(mem_flags::mem_threadgroup);
-//    
-//    // Now build a reduced scene with only the objects visible to this tile
-//    Scene tileReducedScene;
-//    
-//    // Copy all spheres (we don't cull spheres in this example)
-//    for (uint i = 0; i < NUM_SPHERES; i++) {
-//        tileReducedScene.spheres[i] = fullScene.spheres[i];
-//    }
-//    
-//    // Copy visible quads
-//    for (uint i = 0; i < min(tileScene.quadCount, (uint)MAX_QUADS_IN_TILE); i++) {
-//        if (i < NUM_QUADS) {
-//            tileReducedScene.quads[i] = tileScene.quads[i];
-//        }
-//    }
-//    
-//    // Fill remaining quads with empty placeholders if needed
-//    for (uint i = tileScene.quadCount; i < NUM_QUADS; i++) {
-//        tileReducedScene.quads[i] = (Quad){
-//            float3(0), float3(0), float3(0), float3(0), half3(0), DIFFUSE, 0
-//        };
-//    }
-//    
-//    // Copy visible triangles
-//    for (uint i = 0; i < min(tileScene.triangleCount, (uint)MAX_TRIANGLES_IN_TILE); i++) {
-//        if (i < NUM_LIGHTS) {
-//            tileReducedScene.triangles[i] = tileScene.triangles[i];
-//        }
-//    }
-//    
-//    // Fill remaining triangles with empty placeholders if needed
-//    for (uint i = tileScene.triangleCount; i < NUM_LIGHTS; i++) {
-//        tileReducedScene.triangles[i] = (Triangle){
-//            float3(0), float3(0), float3(0), half3(0), false, 0
-//        };
-//    }
-//    
-//    // Initialize RNG seed - add spatial and temporal variation
-//    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
-//    
-//    // Convert pixel coordinates to UV coordinates [0,1]
-//    float2 uv = float2(gid) / float2(width, height);
-//    
-//    // Add jitter for anti-aliasing - use halton sequence for better distribution
-//    float2 jitter = float2(
-//        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
-//        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
-//    ) / float2(width, height);
-//    
-//    uv += jitter;
-//    
-//    // Calculate ray origin and direction for this pixel
-//    float3 rayPosition = params.cameraPosition;
-//    float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
-//    float phi = (uv.y) * M_PI_F;   // latitude: 0 to π
-//    float3 rayDirection;
-//    rayDirection.x = sin(phi) * cos(theta);
-//    rayDirection.y = cos(phi);
-//    rayDirection.z = sin(phi) * sin(theta);
-//    rayDirection = (params.viewMatrix * float4(rayDirection, 0)).xyz;
-//    
-//    // Trace path using the reduced scene specific to this tile
-//    float3 color = pathTrace(rayPosition, rayDirection, tileReducedScene, rngState, frameIndex);
-//    
-//    // Apply gamma correction for display
-//    color = pow(color, float3(1.0/2.2));
-//    
-//    // Write to output texture
-//    output.write(float4(color, 1.0), gid);
-//}

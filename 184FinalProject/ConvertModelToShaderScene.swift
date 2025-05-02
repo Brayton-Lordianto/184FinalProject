@@ -27,8 +27,34 @@ struct Triangle {
     var roughness: Float
 }
 
+// Make a GPU-compatible structure that exactly matches the metal shader struct
+struct GPUTriangle {
+    var p1: SIMD3<Float>
+    var p2: SIMD3<Float>
+    var p3: SIMD3<Float>
+    var color: simd_half3
+    var isLightSource: Bool
+    var intensity: Float
+    var materialType: Int32
+    var roughness: Float
+    
+    init(from triangle: Triangle) {
+        self.p1 = triangle.p1
+        self.p2 = triangle.p2
+        self.p3 = triangle.p3
+        self.color = triangle.color
+        self.isLightSource = triangle.isLightSource
+        self.intensity = triangle.intensity
+        self.materialType = Int32(triangle.material.rawValue)
+        self.roughness = triangle.roughness
+    }
+}
+
 func convertModelToShaderScene(model: Model) -> [Triangle] {
     var triangles = [Triangle]()
+    
+    print("🔄 Starting model conversion to shader scene")
+    print("📊 Model has \(model.meshes.count) meshes")
     
     // Apply model transformation
     var modelMatrix = matrix_identity_float4x4
@@ -36,31 +62,42 @@ func convertModelToShaderScene(model: Model) -> [Triangle] {
     rotateMatrix(matrix: &modelMatrix, rotation: toRadians(from: model.rotation))
     scaleMatrix(matrix: &modelMatrix, scale: model.scale)
     
-    for mesh in model.meshes {
+    for (meshIndex, mesh) in model.meshes.enumerated() {
+        print("📐 Processing mesh #\(meshIndex)")
+        
         // Note: Using buffer index 30 as specified in your vertex descriptor
         if mesh.mesh.vertexBuffers.count <= 0 {
-            print("No vertex buffers found")
+            print("⚠️ No vertex buffers found for mesh #\(meshIndex)")
             continue
         }
         
         let vertexBuffer = mesh.mesh.vertexBuffers[0]
+        print("🔢 Vertex buffer size: \(vertexBuffer.buffer.length), offset: \(vertexBuffer.offset)")
         
         // This is critical - the stride is the size of your Vertex struct
         let vertexStride = MemoryLayout<Vertex>.stride
+        print("🔍 Vertex stride: \(vertexStride) bytes")
         
         // Get raw vertex data
         let vertexData = vertexBuffer.buffer.contents()
         
+        print("🧩 Mesh has \(mesh.mesh.submeshes.count) submeshes")
         for (submeshIndex, submesh) in mesh.mesh.submeshes.enumerated() {
+            print("   ⬢ Processing submesh #\(submeshIndex) with \(submesh.indexCount) indices")
+            
             // Get material
             let material = mesh.materials[submeshIndex]
-            print("material is \(material)")
+            print("   🎨 Material: \(material)")
             
             // Extract color from material - simplistic approach
             let color = simd_half3(0.7, 0.7, 0.7) // Default color
             
             // Get index buffer data
             let indexData = submesh.indexBuffer.buffer.contents()
+            
+            // Print submesh triangle count
+            let triangleCount = submesh.indexCount / 3
+            print("   📐 Submesh triangle count: \(triangleCount)")
             
             // Process triangles
             for i in stride(from: 0, to: submesh.indexCount, by: 3) {
@@ -85,12 +122,30 @@ func convertModelToShaderScene(model: Model) -> [Triangle] {
                     let vertex = vertexPtr.bindMemory(to: Vertex.self, capacity: 1).pointee
                     let position = vertex.position
                     let transformedPosition = applyTransform(position, modelMatrix: modelMatrix)
-//                    vertices[j] = transformedPosition
-                    // MARK: add z back transform so it fits in front of you
+                    // Add z offset so it fits in front of the camera
                     vertices[j] = transformedPosition + SIMD3<Float>(0, 0, -5)
                 }
                 
-                // Create triangle
+                // Create triangle with randomly assigned materials for testing
+                let materialType: MaterialType
+                let roughness: Float
+                
+                // Randomly assign different materials for testing
+                switch (triangles.count % 3) {
+                case 0:
+                    materialType = .diffuse
+                    roughness = 0.1
+                case 1:
+                    materialType = .metal
+                    roughness = 0.3
+                case 2:
+                    materialType = .dielectric
+                    roughness = 0.0
+                default:
+                    materialType = .diffuse
+                    roughness = 0.5
+                }
+                
                 let triangle = Triangle(
                     p1: vertices[0],
                     p2: vertices[1],
@@ -98,20 +153,22 @@ func convertModelToShaderScene(model: Model) -> [Triangle] {
                     color: color,
                     isLightSource: false,
                     intensity: 0.0,
-                    material: .diffuse,
-                    roughness: 0.5
+                    material: materialType,
+                    roughness: roughness
                 )
                 
-                // print triangle positions
-                print("Triangle vertices: \(triangle.p1), \(triangle.p2), \(triangle.p3)")
-                // print colors
-                print("Triangle color: \(triangle.color)")
+                // Only print first and last triangle of each submesh to avoid log spam
+                if i == 0 || i >= submesh.indexCount - 3 {
+                    print("   🔺 Triangle \(i/3) - Vertices: \(triangle.p1), \(triangle.p2), \(triangle.p3)")
+                    print("      💠 Material: \(materialType), Roughness: \(roughness)")
+                }
                 
                 triangles.append(triangle)
             }
         }
     }
     
+    print("✅ Conversion complete. Generated \(triangles.count) triangles for shader")
     return triangles
 }
 

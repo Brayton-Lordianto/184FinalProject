@@ -64,6 +64,10 @@ actor Renderer {
     var computeOutputTexture: MTLTexture?
     var computeTime: Float = 0.0
     
+    // MARK: Model triangle data for path tracing
+    var triangleBuffer: MTLBuffer?
+    var triangleCount: Int = 0
+    
     
     let inFlightSemaphore = DispatchSemaphore(value: maxBuffersInFlight)
     
@@ -122,11 +126,26 @@ actor Renderer {
         vertexDescriptor.attributes[2].offset = MemoryLayout.offset(of: \Vertex.normal)!
         vertexDescriptor.attributes[2].bufferIndex = 30
         let textureLoader = MTKTextureLoader(device: layerRenderer.device)
-        let cornellURL = Bundle.main.url(forResource: "Cornell_Box_2", withExtension: "usdz")!
+        let cornellURL = Bundle.main.url(forResource: "Cornell_Box", withExtension: "usdz")!
         self.obj = Model()
         self.obj!.loadModel(device: device, url: cornellURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
+        
+        // Convert model to shader-compatible triangles
         let triangles = convertModelToShaderScene(model: self.obj!)
-        print(triangles.count)
+        print("Model converted to \(triangles.count) triangles")
+        
+        // Create GPU triangles for passing to shader
+        var gpuTriangles = triangles.map { GPUTriangle(from: $0) }
+        self.triangleCount = gpuTriangles.count
+        
+        // Create triangle buffer for passing to GPU
+        if !gpuTriangles.isEmpty {
+            let triangleBufferSize = MemoryLayout<GPUTriangle>.stride * gpuTriangles.count
+            self.triangleBuffer = device.makeBuffer(bytes: &gpuTriangles, 
+                                                   length: triangleBufferSize,
+                                                   options: .storageModeShared)
+            self.triangleBuffer?.label = "Model Triangles Buffer"
+        }
         // MARK: END
         
         
@@ -597,7 +616,7 @@ actor Renderer {
                 cameraPosition: cameraPosition,
                 viewMatrix: viewMatrix,
                 fovY: fovY,
-                modelTriangleCount: UInt32(mesh.submeshes.count),
+                modelTriangleCount: UInt32(triangleCount) // Pass the actual triangle count
             )
             
             // Calculate threads and threadgroups
@@ -613,6 +632,12 @@ actor Renderer {
             guard let pathTracerEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
             pathTracerEncoder.setComputePipelineState(pathTracerPipeline)
             pathTracerEncoder.setBytes(&params, length: MemoryLayout<ComputeParams>.size, index: 0)
+            
+            // Set the triangle buffer if available
+            if let triangleBuffer = triangleBuffer {
+                pathTracerEncoder.setBuffer(triangleBuffer, offset: 0, index: 1)
+            }
+            
             pathTracerEncoder.setTexture(pathTracerOutput, index: 0)
             pathTracerEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
             pathTracerEncoder.endEncoding()
@@ -632,7 +657,7 @@ actor Renderer {
             copyEncoder.copy(from: outputTexture, to: accumTexture)
             copyEncoder.endEncoding()
             
-            print("Rendering sample \(sampleCount)")
+            print("Rendering sample \(sampleCount) with \(triangleCount) model triangles")
         }
         
         renderEncoder.popDebugGroup()

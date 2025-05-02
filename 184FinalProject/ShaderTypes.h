@@ -48,6 +48,27 @@ typedef struct
     Uniforms uniforms[2];
 } UniformsArray;
 
+#ifdef __METAL_VERSION__
+// Material types matching those in Swift
+typedef enum {
+    DIFFUSE = 0,
+    METAL = 1,
+    DIELECTRIC = 2
+} MaterialType;
+
+// Triangle structure matching Swift side
+typedef struct {
+    packed_float3 p1;
+    packed_float3 p2;
+    packed_float3 p3;
+    packed_half3 color;
+    bool isLightSource;
+    float intensity;
+    int materialType;
+    float roughness;
+} GPUTriangle;
+#endif
+
 typedef struct {
     float time;
     simd_float2 resolution;
