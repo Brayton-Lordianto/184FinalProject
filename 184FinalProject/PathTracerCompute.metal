@@ -483,6 +483,34 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     // Use the frameIndex parameter that's now passed from Swift
     uint frameIndex = params.frameIndex;
     uint modelTriangleCount = params.modelTriangleCount;
+//    modelTriangleCount = 0;
+    
+    // check the first triangle
+    // assert the following:
+    /*
+     p1: SIMD3<Float>(-2, -2, -8),
+     p2: SIMD3<Float>(2, -2, -8),
+     p3: SIMD3<Float>(2, 2, -8),
+     color: simd_half3(0.5, 0.5, 0.8),
+     */
+//    if (length(modelTriangles[0].p1 - float3(-2, -2, -8)) < 0.01 &&
+//        length(modelTriangles[0].p2 - float3(2, -2, -8)) < 0.01 &&
+//        length(modelTriangles[0].p3 - float3(2, 2, -8)) < 0.01 && length(modelTriangles[0].color - half3(0.5, 0.5, 0.8)) < 0.01 && modelTriangles[0].roughness == 1) {
+//        output.write(float4(1), gid);
+//    } else output.write(float4(0), gid);
+//    return;
+    
+    // check the second triangle
+    /*
+     p1: SIMD3<Float>(-2, -2, -8),
+     p2: SIMD3<Float>(2, 2, -8),
+     p3: SIMD3<Float>(-2, 2, -8),
+     color: simd_half3(0.5, 0.5, 0.8),
+     */
+//    if (length(modelTriangles[1].p1 - float3(-2, -2, -8)) < 0.01 && length(modelTriangles[1].p2 - float3(2, 2, -8)) < 0.01 && length(modelTriangles[1].p3 - float3(-2, 2, -8)) < 0.01 && length(modelTriangles[1].color - half3(0.5, 0.5, 0.8)) < 0.01) {
+//        output.write(float4(1), gid);
+//    } else output.write(float4(0), gid);
+//    return;
 
     // Initialize Cornell box scene
     // Most of this scene is now just for reference and can be commented out

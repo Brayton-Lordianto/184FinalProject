@@ -138,11 +138,15 @@ actor Renderer {
         var gpuTriangles = triangles.map { GPUTriangle(from: $0) }
         self.triangleCount = gpuTriangles.count
         
-        // Create triangle buffer for passing to GPU
+        // MARK: use fake triangels
+        gpuTriangles = fakeTriangles.map { GPUTriangle(from: $0) }
+        self.triangleCount = gpuTriangles.count
+
         if !gpuTriangles.isEmpty {
-            let triangleBufferSize = MemoryLayout<GPUTriangle>.stride * gpuTriangles.count
-            self.triangleBuffer = device.makeBuffer(bytes: &gpuTriangles, 
-                                                   length: triangleBufferSize,
+            let triangleBufferSize = (MemoryLayout<GPUTriangle>.stride) * gpuTriangles.count
+            let alignedTriangleBufferSize = (triangleBufferSize + 0xFF) & -0x100
+            self.triangleBuffer = device.makeBuffer(bytes: &gpuTriangles,
+                                                   length: alignedTriangleBufferSize,
                                                    options: .storageModeShared)
             self.triangleBuffer?.label = "Model Triangles Buffer"
         }

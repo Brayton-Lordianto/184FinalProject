@@ -15,9 +15,9 @@ let fakeTriangles: [Triangle] = [
         p3: SIMD3<Float>(2, 2, -8),
         color: simd_half3(0.5, 0.5, 0.8),
         isLightSource: false,
-        intensity: 0.0,
+        intensity: 2.0,
         material: .dielectric,
-        roughness: 0.0
+        roughness: 1.0
     ),
     Triangle(
         p1: SIMD3<Float>(-2, -2, -8),

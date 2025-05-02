@@ -27,7 +27,21 @@ struct Triangle {
     var roughness: Float
 }
 
-// Make a GPU-compatible structure that exactly matches the metal shader struct
+struct GPUTriangleAligned {
+    var p1: SIMD3<Float>
+    var _padding: SIMD3<Float>
+    var p2: SIMD3<Float>
+    var _padding2: SIMD2<Float>
+    var p3: SIMD3<Float>
+    var _padding3: Float
+    var color: simd_half3
+    var _padding4: Float
+    var isLightSource: Bool
+    var intensity: Float
+    var materialType: Int32
+    var roughness: Float
+}
+
 struct GPUTriangle {
     var p1: SIMD3<Float>
     var p2: SIMD3<Float>
