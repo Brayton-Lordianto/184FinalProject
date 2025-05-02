@@ -18,11 +18,18 @@ typedef NSInteger EnumBackingType;
 
 #include <simd/simd.h>
 
+// Constants for tile-based rendering
+#define TILE_SIZE 16
+#define MAX_TRIANGLES_IN_TILE 32
+#define MAX_QUADS_IN_TILE 32
+#define MAX_SAMPLES_PER_TILE 64
+
 typedef NS_ENUM(EnumBackingType, BufferIndex)
 {
     BufferIndexMeshPositions = 0,
     BufferIndexMeshGenerics  = 1,
-    BufferIndexUniforms      = 2
+    BufferIndexUniforms      = 2,
+    BufferIndexTileData      = 3
 };
 
 typedef NS_ENUM(EnumBackingType, VertexAttribute)
@@ -34,7 +41,14 @@ typedef NS_ENUM(EnumBackingType, VertexAttribute)
 typedef NS_ENUM(EnumBackingType, TextureIndex)
 {
     TextureIndexColor    = 0,
-    TextureIndexCompute  = 1, 
+    TextureIndexCompute  = 1,
+    TextureIndexTileData = 2,
+};
+
+typedef NS_ENUM(EnumBackingType, ThreadgroupIndex)
+{
+    ThreadgroupIndexTileData = 0,
+    ThreadgroupIndexAccumData = 1
 };
 
 typedef struct
@@ -58,6 +72,24 @@ typedef struct {
     float fovY;
 } ComputeParams;
 
+// Tile-specific data structures
+typedef struct TileData {
+    // Per-tile accumulation data
+    vector_float4 accumulatedColor;
+    uint sampleCount;
+    // Bounding box in world space
+    vector_float3 minBounds;
+    vector_float3 maxBounds;
+    // Additional tile metadata
+    uint tileIndex;
+    bool needsReset;
+} TileData;
+
+// Structure for communicating between compute and fragment shaders
+typedef struct {
+    vector_float4 color;
+    uint sampleCount;
+} TileOutput;
 
 #endif /* ShaderTypes_h */
 

@@ -275,6 +275,8 @@ actor Renderer {
     private var sampleCount: UInt32 = 0
     private var lastFrameTime: Double = 0
     private var isMoving: Bool = false
+    private var tileDataBuffer: MTLBuffer?
+    private var needsReset: Bool = true
     
     private func setupComputePipelines() {
         guard let library = device.makeDefaultLibrary() else { return }
@@ -283,7 +285,6 @@ actor Renderer {
         if let function = library.makeFunction(name: "pathTracerCompute") {
             do {
                 let pipeline = try device.makeComputePipelineState(function: function)
-                computePipelines["pathTracerCompute"] = pipeline
                 computePipelines["pathTracerCompute"] = pipeline
             } catch {
                 print("Failed to create compute pipeline for pathTracerCompute: \(error)")
@@ -297,6 +298,16 @@ actor Renderer {
                 computePipelines["accumulationKernel"] = pipeline
             } catch {
                 print("Failed to create compute pipeline for accumulationKernel: \(error)")
+            }
+        }
+        
+        // Create tile-specific accumulation kernel
+        if let function = library.makeFunction(name: "tileAccumulationKernel") {
+            do {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                computePipelines["tileAccumulationKernel"] = pipeline
+            } catch {
+                print("Failed to create compute pipeline for tileAccumulationKernel: \(error)")
             }
         }
     }
@@ -319,13 +330,60 @@ actor Renderer {
         pathTracerOutputTexture = createTexture()    // Single sample from pathTracer
         accumulationTexture = createTexture()        // Accumulated results
         
+        // Create tile data buffer
+        createTileDataBuffer(width: width, height: height)
+        
         // Reset sample count when creating new textures
         resetAccumulation()
+    }
+    
+    private func createTileDataBuffer(width: Int, height: Int) {
+        // Calculate number of tiles
+        let tileSize = 16
+        let tilesWide = (width + tileSize - 1) / tileSize
+        let tilesHigh = (height + tileSize - 1) / tileSize
+        let totalTiles = tilesWide * tilesHigh
+        
+        // Create buffer for tile data
+        let bufferSize = MemoryLayout<TileData>.stride * totalTiles
+        tileDataBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared)
+        tileDataBuffer?.label = "TileDataBuffer"
+        
+        // Initialize tile data
+        initializeTileData(tilesWide: tilesWide, tilesHigh: tilesHigh)
+    }
+    
+    private func initializeTileData(tilesWide: Int, tilesHigh: Int) {
+        guard let tileDataPtr = tileDataBuffer?.contents() else { return }
+        
+        let totalTiles = tilesWide * tilesHigh
+        let tileDataArray = UnsafeMutableBufferPointer<TileData>(
+            start: tileDataPtr.bindMemory(to: TileData.self, capacity: totalTiles),
+            count: totalTiles
+        )
+        
+        // Initialize each tile
+        for i in 0..<totalTiles {
+            var tileData = TileData()
+            tileData.accumulatedColor = SIMD4<Float>(0, 0, 0, 0)
+            tileData.sampleCount = 0
+            tileData.tileIndex = UInt32(i)
+            tileData.needsReset = true
+            
+            // Optional: Set tile bounds for spatial culling (not used in this implementation)
+            tileData.minBounds = SIMD3<Float>(-Float.infinity, -Float.infinity, -Float.infinity)
+            tileData.maxBounds = SIMD3<Float>(Float.infinity, Float.infinity, Float.infinity)
+            
+            tileDataArray[i] = tileData
+        }
     }
     
     private func resetAccumulation() {
         sampleCount = 0
         print("Resetting accumulation buffer")
+        
+        // Reset all tile data
+        markAllTilesForReset()
         
         // Simply create a new texture when resetting instead of clearing the old one
         // This is more efficient in Metal and avoids synchronization issues
@@ -341,6 +399,32 @@ actor Renderer {
         
         // Create a new texture with the same dimensions
         accumulationTexture = device.makeTexture(descriptor: descriptor)
+    }
+    
+    private func markAllTilesForReset() {
+        guard let tileDataPtr = tileDataBuffer?.contents(),
+              let outputTexture = computeOutputTexture else { return }
+        
+        let width = outputTexture.width
+        let height = outputTexture.height
+        let tileSize = 16
+        let tilesWide = (width + tileSize - 1) / tileSize
+        let tilesHigh = (height + tileSize - 1) / tileSize
+        let totalTiles = tilesWide * tilesHigh
+        
+        let tileDataArray = UnsafeMutableBufferPointer<TileData>(
+            start: tileDataPtr.bindMemory(to: TileData.self, capacity: totalTiles),
+            count: totalTiles
+        )
+        
+        // Mark all tiles for reset
+        for i in 0..<totalTiles {
+            tileDataArray[i].needsReset = true
+            tileDataArray[i].sampleCount = 0
+        }
+        
+        // Global flag to indicate reset needed
+        needsReset = true
     }
     // MARK: ===============
     
@@ -500,6 +584,8 @@ actor Renderer {
         renderEncoder.setFragmentTexture(colorMap, index: TextureIndex.color.rawValue)
         // MARK: set the compute texture
         renderEncoder.setFragmentTexture(computeOutputTexture, index: TextureIndex.compute.rawValue)
+        // MARK: set the tile data buffer for direct access in the fragment shader
+        renderEncoder.setFragmentBuffer(tileDataBuffer, offset: 0, index: BufferIndex.tileData.rawValue)
         // MARK: ===================
         for submesh in mesh.submeshes {
             renderEncoder.drawIndexedPrimitives(type: submesh.primitiveType,
@@ -513,9 +599,11 @@ actor Renderer {
         func dispatchComputeCommands(commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) {
             guard let pathTracerPipeline = computePipelines["pathTracerCompute"],
                   let accumulationPipeline = computePipelines["accumulationKernel"],
+                  let tileAccumPipeline = computePipelines["tileAccumulationKernel"],
                   let outputTexture = computeOutputTexture,
                   let pathTracerOutput = pathTracerOutputTexture,
-                  let accumTexture = accumulationTexture else {
+                  let accumTexture = accumulationTexture,
+                  let tileDataBuffer = tileDataBuffer else {
                 return
             }
             
@@ -560,39 +648,55 @@ actor Renderer {
                 fovY: fovY
             )
             
-            // Calculate threads and threadgroups
-            // pretty standard setup for compute shaders
-            let threadsPerThreadgroup = MTLSize(width: 32, height: 8, depth: 1)
-            let threadgroupCount = MTLSize(
-                width: (outputTexture.width + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
-                height: (outputTexture.height + threadsPerThreadgroup.height - 1) / threadsPerThreadgroup.height,
+            // Calculate tile-based threadgroups and threads
+            let tileSize = 16
+            let threadsPerTile = MTLSize(width: tileSize, height: tileSize, depth: 1)
+            let tilesWide = (outputTexture.width + tileSize - 1) / tileSize
+            let tilesHigh = (outputTexture.height + tileSize - 1) / tileSize
+            let tileCount = MTLSize(width: tilesWide, height: tilesHigh, depth: 1)
+            
+            // Define the size of threadgroup memory needed for tiles
+            let tileOutputSize = MemoryLayout<TileOutput>.stride
+            
+            // Standard threadgroups for full screen passes
+            let standardThreads = MTLSize(width: 32, height: 8, depth: 1)
+            let standardGroups = MTLSize(
+                width: (outputTexture.width + standardThreads.width - 1) / standardThreads.width,
+                height: (outputTexture.height + standardThreads.height - 1) / standardThreads.height,
                 depth: 1
             )
             
-            // PASS 1: Path Tracer - generates a single sample
+            // PASS 1: Path Tracer - process pixels
             guard let pathTracerEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
             pathTracerEncoder.setComputePipelineState(pathTracerPipeline)
             pathTracerEncoder.setBytes(&params, length: MemoryLayout<ComputeParams>.size, index: 0)
+            pathTracerEncoder.setBuffer(tileDataBuffer, offset: 0, index: BufferIndex.tileData.rawValue)
             pathTracerEncoder.setTexture(pathTracerOutput, index: 0) // Write to the pathTracer output texture
-            pathTracerEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
+            
+            // Use simplified dispatching initially
+            pathTracerEncoder.setThreadgroupMemoryLength(tileOutputSize, index: ThreadgroupIndex.tileData.rawValue)
+            pathTracerEncoder.dispatchThreadgroups(standardGroups, threadsPerThreadgroup: standardThreads)
             pathTracerEncoder.endEncoding()
             
-            // PASS 2: Accumulation Pass - combines this sample with previous samples
+            // PASS 2: Simple accumulation pass
             guard let accumEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
             accumEncoder.setComputePipelineState(accumulationPipeline)
             accumEncoder.setBytes(&sampleCount, length: MemoryLayout<UInt32>.size, index: 0)
+            accumEncoder.setBuffer(tileDataBuffer, offset: 0, index: BufferIndex.tileData.rawValue)
             accumEncoder.setTexture(pathTracerOutput, index: 0)   // Current frame
             accumEncoder.setTexture(accumTexture, index: 1)       // Accumulated frames
-            accumEncoder.setTexture(outputTexture, index: 2)      // Output for display and next accumulation
-            accumEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
+            accumEncoder.setTexture(outputTexture, index: 2)      // Output for display
+            
+            // Simplified dispatch for now
+            accumEncoder.dispatchThreadgroups(standardGroups, threadsPerThreadgroup: standardThreads)
             accumEncoder.endEncoding()
             
-            // Also write accumulated result back to accumTexture for next frame
+            // Copy accumulated result back for next frame
             guard let copyEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
             copyEncoder.copy(from: outputTexture, to: accumTexture)
             copyEncoder.endEncoding()
             
-            print("Rendering sample \(sampleCount)")
+            print("Rendering sample \(sampleCount), tiles: \(tilesWide)×\(tilesHigh)")
         }
         
         renderEncoder.popDebugGroup()
