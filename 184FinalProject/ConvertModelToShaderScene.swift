@@ -99,6 +99,7 @@ func convertModelToShaderScene(model: Model) -> [Triangle] {
         for (submeshIndex, submesh) in mesh.mesh.submeshes.enumerated() {
             print("   ⬢ Processing submesh #\(submeshIndex) with \(submesh.indexCount) indices")
             
+            
             // Get material
             let material = mesh.materials[submeshIndex]
             print("   🎨 Material: \(material)")

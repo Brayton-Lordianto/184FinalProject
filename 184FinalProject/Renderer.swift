@@ -102,7 +102,7 @@ actor Renderer {
         self.device = layerRenderer.device
 
         // MARK: load up your meshes
-        /* E.G.
+        /* E.G. this was referenced from existing project with parser.
          let textureLoader = MTKTextureLoader(device: self.device)
          let sponzaURL = Bundle.main.url(forResource: "Sponza_Scene", withExtension: "usdz")!
          self.sponzaModel = Model()
@@ -139,8 +139,8 @@ actor Renderer {
         self.triangleCount = gpuTriangles.count
         
         // MARK: use fake triangels
-        gpuTriangles = fakeTriangles.map { GPUTriangle(from: $0) }
-        self.triangleCount = gpuTriangles.count
+//        gpuTriangles = fakeTriangles.map { GPUTriangle(from: $0) }
+//        self.triangleCount = gpuTriangles.count
 
         if !gpuTriangles.isEmpty {
             let triangleBufferSize = (MemoryLayout<GPUTriangle>.stride) * gpuTriangles.count

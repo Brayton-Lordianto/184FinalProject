@@ -483,65 +483,10 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     // Use the frameIndex parameter that's now passed from Swift
     uint frameIndex = params.frameIndex;
     uint modelTriangleCount = params.modelTriangleCount;
-//    modelTriangleCount = 0;
-    
-    // check the first triangle
-    // assert the following:
-    /*
-     p1: SIMD3<Float>(-2, -2, -8),
-     p2: SIMD3<Float>(2, -2, -8),
-     p3: SIMD3<Float>(2, 2, -8),
-     color: simd_half3(0.5, 0.5, 0.8),
-     */
-//    if (length(modelTriangles[0].p1 - float3(-2, -2, -8)) < 0.01 &&
-//        length(modelTriangles[0].p2 - float3(2, -2, -8)) < 0.01 &&
-//        length(modelTriangles[0].p3 - float3(2, 2, -8)) < 0.01 && length(modelTriangles[0].color - half3(0.5, 0.5, 0.8)) < 0.01 && modelTriangles[0].roughness == 1) {
-//        output.write(float4(1), gid);
-//    } else output.write(float4(0), gid);
-//    return;
-    
-    // check the second triangle
-    /*
-     p1: SIMD3<Float>(-2, -2, -8),
-     p2: SIMD3<Float>(2, 2, -8),
-     p3: SIMD3<Float>(-2, 2, -8),
-     color: simd_half3(0.5, 0.5, 0.8),
-     */
-//    if (length(modelTriangles[1].p1 - float3(-2, -2, -8)) < 0.01 && length(modelTriangles[1].p2 - float3(2, 2, -8)) < 0.01 && length(modelTriangles[1].p3 - float3(-2, 2, -8)) < 0.01 && length(modelTriangles[1].color - half3(0.5, 0.5, 0.8)) < 0.01) {
-//        output.write(float4(1), gid);
-//    } else output.write(float4(0), gid);
-//    return;
 
     // Initialize Cornell box scene
-    // Most of this scene is now just for reference and can be commented out
-    // as we'll rely on model triangles passed from Swift
+    // now we'll rely on model triangles passed from Swift
     Scene scene = {
-        /* Comment out
-        .quads = {
-            // Room walls, floor, ceiling
-            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIELECTRIC, 0.0 },  // Back wall (blue)
-            { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2), DIELECTRIC, 0.0 },  // Left wall (red)
-            { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIELECTRIC, 0.0 },  // Right wall (green)
-            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Floor (light gray)
-            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Ceiling (light gray)
-            
-            // Tall box (metallic)
-            { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Front face
-            { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Left face
-            { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Right face
-            { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Back face
-            { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Top face
-            
-            // Short box (glass-like)
-            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Left face
-            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Right face
-            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Back face
-            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(DIELECTRIC, 0.9, 0.9), DIFFUSE, 0.0 },  // Top face
-            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 }   // Bottom face
-        },
-        */
-        
-        // Always include lights for illumination
         .lights = {
             { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
             ,{ float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
