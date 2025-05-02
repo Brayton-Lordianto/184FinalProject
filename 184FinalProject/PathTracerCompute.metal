@@ -19,7 +19,7 @@ using namespace metal;
 // Scene constants
 #define NUM_SPHERES 1
 #define NUM_QUADS 15
-#define NUM_TRIANGLES 2
+#define NUM_LIGHTS 3
 
 // Halton sequence primes for better sampling
 constant unsigned int primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
@@ -67,7 +67,7 @@ typedef struct {
 typedef struct {
     Sphere spheres[NUM_SPHERES];
     Quad quads[NUM_QUADS];
-    Triangle triangles[NUM_TRIANGLES];
+    Triangle lights[NUM_LIGHTS];
 } Scene;
 
 // RNG functions
@@ -85,6 +85,7 @@ float RandomFloat01(thread uint& state) {
     return float(state) / 4294967296.0;
 }
 
+// this is a generator of random numbers on halton sequence. This was used also in a wwdc example of compute shader ray tracing in apple.
 float halton(unsigned int i, unsigned int d) {
     unsigned int b = primes[d % 12];
     float f = 1.0f;
@@ -109,7 +110,6 @@ float3 RandomUnitVector(thread uint& state) {
     return float3(x, y, z);
 }
 
-// Generate a random direction in the hemisphere around the normal
 float3 RandomInHemisphere(float3 normal, thread uint& state) {
     float3 inUnitSphere = RandomUnitVector(state);
     if (dot(inUnitSphere, normal) > 0.0) // In the same hemisphere as the normal
@@ -118,20 +118,15 @@ float3 RandomInHemisphere(float3 normal, thread uint& state) {
         return -inUnitSphere;
 }
 
-// Generate a random direction weighted by cosine (better for diffuse materials)
 float3 RandomCosineDirection(thread uint& state, float3 normal) {
-    // Create a local coordinate system aligned with the normal
     float3 up = abs(normal.y) > 0.999 ? float3(1, 0, 0) : float3(0, 1, 0);
     float3 tangent = normalize(cross(up, normal));
     float3 bitangent = cross(normal, tangent);
-    
-    // Generate a random point on the unit hemisphere (cosine weighted)
     float r1 = RandomFloat01(state);
     float r2 = RandomFloat01(state);
     float phi = 2.0 * M_PI_F * r1;
-    float cosTheta = sqrt(r2); // Cosine weighted
+    float cosTheta = sqrt(r2);
     float sinTheta = sqrt(1.0 - r2);
-    
     float3 randomLocal = float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
     
     // Transform to world space
@@ -279,9 +274,9 @@ RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene) {
         }
     }
     
-    // Check intersections with all triangles (some may be light sources)
-    for (int i = 0; i < NUM_TRIANGLES; i++) {
-        Triangle triangle = scene.triangles[i];
+    // Check intersections with all lights
+    for (int i = 0; i < NUM_LIGHTS; i++) {
+        Triangle triangle = scene.lights[i];
         // Skip invalid triangles
         if (length(triangle.p1) + length(triangle.p2) + length(triangle.p3) <= 0.0) continue;
         
@@ -304,51 +299,45 @@ bool isInShadow(float3 point, float3 lightDir, float lightDistance, Scene scene)
     // hit.emission trick so if its a light it should output false
     return (length(hit.emission) <= 0) * hit.hit;
 }
+    
+// do it like this so no control flow needed.
+float shadowFactor(float3 point, float3 lightDir, float lightDistance, Scene scene) {
+    float3 shadowRayOrigin = point + lightDir * SHADOW_BIAS;
+    RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene);
+    // Return 0.0 when in shadow, 1.0 when not in shadow
+    return 1.0 - float(hit.hit && length(hit.emission) <= 0);
+}
+
 
 // Sample a point on a triangle light source
 float3 sampleLightSource(Triangle light, thread uint& rng) {
     float u = RandomFloat01(rng);
     float v = RandomFloat01(rng);
-    
-    // Ensure valid barycentric coordinates
     if (u + v > 1.0f) {
         u = 1.0f - u;
         v = 1.0f - v;
     }
-    
-    // Barycentric coordinates
     float w = 1.0f - u - v;
     return light.p1 * u + light.p2 * v + light.p3 * w;
 }
 
-// Material BRDF evaluation
-float3 evaluateBRDF(float3 inDir, float3 outDir, float3 normal, float3 albedo, 
+float3 evaluateBRDF(float3 inDir, float3 outDir, float3 normal, float3 albedo,
                     MaterialType materialType, float roughness) {
-    if (materialType == DIFFUSE) {
-        // Lambertian diffuse
-        return albedo / M_PI_F;
-    } 
-    else if (materialType == METAL) {
-        // Simple specular reflection with roughness
-        float3 reflected = reflect(inDir, normal);
-        float alignment = max(0.0, dot(normalize(reflected), normalize(outDir)));
-        float specular = pow(alignment, (1.0/max(roughness, 0.01)) * 20.0);
-        return albedo * (0.2 + 0.8 * specular);
-    }
-    else if (materialType == DIELECTRIC) {
-        // Simple glass-like material (not physically accurate)
-        float fresnel = 0.2 + 0.8 * pow(1.0 - abs(dot(normal, outDir)), 5.0);
-        return albedo * fresnel;
-    }
-    
-    return albedo; // Fallback
+    float3 diffuseComponent = albedo / M_PI_F;
+    float3 reflected = reflect(inDir, normal);
+    float alignment = max(0.0, dot(normalize(reflected), normalize(outDir)));
+    float specular = pow(alignment, (1.0/max(roughness, 0.01)) * 20.0);
+    float3 metalComponent = albedo * (0.2 + 0.8 * specular);
+    float fresnel = 0.2 + 0.8 * pow(1.0 - abs(dot(normal, outDir)), 5.0);
+    float3 dielectricComponent = albedo * fresnel;
+    return diffuseComponent * float(materialType == DIFFUSE) +
+           metalComponent * float(materialType == METAL) +
+           dielectricComponent * float(materialType == DIELECTRIC);
 }
-
-// Sample a direction based on material type
-float3 sampleDirection(float3 inDir, float3 normal, MaterialType materialType, 
+    
+float3 sampleDirection(float3 inDir, float3 normal, MaterialType materialType,
                        float roughness, thread uint& rng) {
     if (materialType == DIFFUSE) {
-        // Cosine-weighted sampling for diffuse materials
         return RandomCosineDirection(rng, normal);
     }
     else if (materialType == METAL) {
@@ -363,15 +352,12 @@ float3 sampleDirection(float3 inDir, float3 normal, MaterialType materialType,
         float fresnel = 0.2 + 0.8 * pow(1.0 - cosTheta, 5.0); // Schlick's approximation
         
         if (RandomFloat01(rng) < fresnel) {
-            // Reflect
             return reflect(inDir, normal);
         } else {
-            // Simple approximation of refraction
             return RandomInHemisphere(-normal, rng);
         }
     }
     
-    // Default fallback
     return RandomInHemisphere(normal, rng);
 }
 
@@ -384,21 +370,14 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
     
     // Loop for multiple bounces
     for (int bounce = 0; bounce <= MAX_BOUNCES; ++bounce) {
-        // Trace ray and get intersection
         RayHit hit = rayTraceHit(rayPos, rayDir, scene);
-        
         // If no hit, add background contribution and break
         if (!hit.hit || hit.dist >= SUPER_FAR) {
-//            float3 backgroundColor = float3(0.5 + 0.5 * rayDir.y, 0.7, 0.9 + 0.1 * rayDir.y);
-//            backgroundColor = float3(0);
-//            backgroundColor = float3(1, 0, 1);
-//            finalColor += backgroundColor * throughput * 0.3; // Reduced brightness for better contrast
             break;
         }
         
-        // Compute intersection point
         float3 hitPoint = rayPos + rayDir * hit.dist;
-        
+//        return hit.albedo;
         // If we hit a light directly, add emission and break
         if (length(hit.emission) > 0) {
             finalColor += hit.emission * throughput;
@@ -407,60 +386,46 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
         
         // DIRECT LIGHTING AT POINT WE HIT
         // IMPORTANCE SAMPLE
-        for (int lightI = 0; lightI < NUM_TRIANGLES; ++lightI) {
-            Triangle light = scene.triangles[lightI];
+        for (int lightI = 0; lightI < NUM_LIGHTS; ++lightI) {
+            Triangle light = scene.lights[lightI];
             if (!light.isLightSource) continue;
             
             int num_light_samples = NUM_MONTE_CARLO_SAMPLES;
             for (int i = 0; i < num_light_samples; ++i) {
-                // Sample a point on the light source
                 float3 lightPos = sampleLightSource(light, rng);
-                
-                // Compute direction to light
                 float3 lightDir = normalize(lightPos - hitPoint);
-                
-                // Check if point is in shadow
                 float lightDistance = length(lightPos - hitPoint);
-//                return float3(1, 0, 0);
-//                if (isInShadow(hitPoint, lightDir, lightDistance, scene)) return float3(1,0,0);
-                if (isInShadow(hitPoint, lightDir, lightDistance, scene)) continue;
-//                return float3(0, 1, 0);
-                
-                // Compute lighting contribution
+                float shadow = shadowFactor(hitPoint, lightDir, lightDistance, scene);
                 float3 brdf = evaluateBRDF(-rayDir, lightDir, hit.normal, hit.albedo,
                                            hit.material, hit.roughness);
-                
-//                // Add contribution to final color
-//                finalColor += float3(1);
-//                return float3(1);
-                finalColor += brdf * throughput * max(0.0, dot(hit.normal, lightDir)) / (lightDistance * lightDistance);
+                float cos_theta = abs(dot(hit.normal, lightDir));
+                float inverseSquareLawFactor = 1 / (lightDistance * lightDistance);
+                finalColor += shadow * brdf * throughput * cos_theta * inverseSquareLawFactor;
             }
         }
         
-        // Update for next bounce based on material properties
+        // UPDATE FOR NEXT BOUNCE
         float3 newRayDir = sampleDirection(rayDir, hit.normal, hit.material, hit.roughness, rng);
         rayPos = hitPoint + hit.normal * SHADOW_BIAS; // Nudge to avoid self-intersection
         rayDir = newRayDir;
         
-        // Update throughput based on BRDF and probability
-        float3 brdf = evaluateBRDF(-rayDir, newRayDir, hit.normal, hit.albedo, 
+        // GET NEXT BOUNCE'S CONTRIBUTION
+        float3 brdf = evaluateBRDF(-rayDir, newRayDir, hit.normal, hit.albedo,
                                  hit.material, hit.roughness);
-        throughput *= brdf * 2.0; // Simple scaling factor
-        
-        // Russian roulette for path termination (prevents excessive computation)
+        throughput *= brdf * 2.0;
         if (bounce > 1) {
             float p = max(max(throughput.x, throughput.y), throughput.z);
             if (RandomFloat01(rng) > p) {
-                break; // Terminate path with probability 1-p
+                break;
             }
-            throughput /= p; // Unbiased estimator correction
+            throughput /= p; // basically how much in the next ray shot it will contribute.
         }
     }
      
     return finalColor;
 }
 
-// Compute shader to perform path tracing
+// Standard compute shader path tracing implementation (original)
 kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0)]],
                              constant ComputeParams &params [[buffer(0)]],
                              uint2 gid [[thread_position_in_grid]]) {
@@ -487,8 +452,8 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
             { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIELECTRIC, 0.0 },  // Back wall (blue)
             { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2), DIELECTRIC, 0.0 },  // Left wall (red)
             { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIELECTRIC, 0.0 },  // Right wall (green)
-            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), DIELECTRIC, 0.0 },  // Floor (light gray)
-            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), DIELECTRIC, 0.0 },  // Ceiling (light gray)
+            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Floor (light gray)
+            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Ceiling (light gray)
             
             // Tall box (metallic)
             { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Front face
@@ -498,32 +463,31 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
             { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Top face
             
             // Short box (glass-like)
-            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Front face
-            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Left face
-            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Right face
-            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Back face
-            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Top face
+            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Left face
+            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Right face
+            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },  // Back face
+            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(DIELECTRIC, 0.9, 0.9), DIFFUSE, 0.0 },  // Top face
+            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 }   // Bottom face
         },
-        .triangles = {
+        .lights = {
             { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
-            ,{ float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
+            ,{ float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
+            { float3(-1, 1.9, -2), float3(-1, 1.9, -4.5), float3(1, 1.9, -4.5), half3(1, 1, 1), true, 100.0 }
         }
     };
 
     // Initialize RNG seed - add spatial and temporal variation
     uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
-
     // Convert pixel coordinates to UV coordinates [0,1]
     float2 uv = float2(gid) / float2(width, height);
-    
     // Add jitter for anti-aliasing - use halton sequence for better distribution
     float2 jitter = float2(
         halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
         halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
     ) / float2(width, height);
-    
     uv += jitter;
     
+    // initialize ray direction
     float3 rayPosition = params.cameraPosition;
     float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
     float phi = (uv.y) * M_PI_F;   // latitude: 0 to π 540
@@ -538,5 +502,265 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     // Apply gamma correction for display
     color = pow(color, float3(1.0/2.2));
     // Write to output texture
+    // if not black
+//    if (length(color) > 0.0001) {
     output.write(float4(color, 1.0), gid);
+//    }
 }
+
+// Constants for tile size
+//#define TILE_SIZE 16
+//#define MAX_TRIANGLES_IN_TILE 32
+//#define MAX_QUADS_IN_TILE 32
+//#define THREADGROUP_MEMORY_SIZE 16384
+//
+//// Struct to hold scene elements visible to a specific tile
+//typedef struct {
+//    Triangle triangles[MAX_TRIANGLES_IN_TILE];
+//    Quad quads[MAX_QUADS_IN_TILE];
+//    uint triangleCount;
+//    uint quadCount;
+//} TileVisibleScene;
+//
+//// Test if a triangle potentially intersects a tile's frustum
+//bool triangleIntersectsTile(Triangle triangle, float3 tileCenter, float tileSize, float viewDistance) {
+//    // Simple bounding sphere test for triangle
+//    float3 triangleCenter = (triangle.p1 + triangle.p2 + triangle.p3) / 3.0;
+//    float triangleRadius = max(max(length(triangle.p1 - triangleCenter), 
+//                                 length(triangle.p2 - triangleCenter)),
+//                             length(triangle.p3 - triangleCenter));
+//    
+//    // Approximate tile as a sphere for quick test
+//    float distance = length(triangleCenter - tileCenter);
+//    
+//    // If triangle center is behind camera, still include if it's a light
+//    if (dot(triangleCenter - tileCenter, normalize(tileCenter)) < 0 && !triangle.isLightSource) {
+//        return false;
+//    }
+//    
+//    // Include triangle if it's close enough or is a light source (always include lights)
+//    return triangle.isLightSource || (distance < (tileSize + triangleRadius + viewDistance));
+//}
+//
+//// Test if a quad potentially intersects a tile's frustum
+//bool quadIntersectsTile(Quad quad, float3 tileCenter, float tileSize, float viewDistance) {
+//    // Simple bounding sphere test for quad
+//    float3 quadCenter = (quad.p0 + quad.p1 + quad.p2 + quad.p3) / 4.0;
+//    float quadRadius = max(max(max(length(quad.p0 - quadCenter), 
+//                               length(quad.p1 - quadCenter)),
+//                           length(quad.p2 - quadCenter)),
+//                       length(quad.p3 - quadCenter));
+//    
+//    // Approximate tile as a sphere for quick test
+//    float distance = length(quadCenter - tileCenter);
+//    
+//    // If quad center is behind camera, don't include it
+//    if (dot(quadCenter - tileCenter, normalize(tileCenter)) < 0) {
+//        return false;
+//    }
+//    
+//    // Include quad if it's close enough
+//    return (distance < (tileSize + quadRadius + viewDistance));
+//}
+//
+//// Tile-based path tracing implementation
+//kernel void tilePathTracerCompute(
+//    texture2d<float, access::write> output [[texture(0)]],
+//    constant ComputeParams &params [[buffer(0)]],
+//    uint2 gid [[thread_position_in_grid]],
+//    uint2 tid [[thread_position_in_threadgroup]],
+//    uint2 blockIdx [[threadgroup_position_in_grid]]
+//) {
+//    // Define tile dimensions
+//    const uint TILE_WIDTH = TILE_SIZE;
+//    const uint TILE_HEIGHT = TILE_SIZE;
+//    
+//    // Get dimensions
+//    uint width = output.get_width();
+//    uint height = output.get_height();
+//    
+//    // Skip if out of bounds
+//    if (gid.x >= width || gid.y >= height) {
+//        return;
+//    }
+//    
+//    // Calculate tile-specific parameters
+//    uint frameIndex = params.frameIndex;
+//    uint sampleCount = params.sampleCount;
+//    float tileSize = max(float(TILE_WIDTH) / float(width), float(TILE_HEIGHT) / float(height));
+//    
+//    // Create space for visible scene elements to this tile
+//    threadgroup TileVisibleScene tileScene;
+//    
+//    // Only initialize the tile data once per tile (by the first thread)
+//    if (tid.x == 0 && tid.y == 0) {
+//        tileScene.triangleCount = 0;
+//        tileScene.quadCount = 0;
+//    }
+//    
+//    // Ensure all threads see the initialization
+//    threadgroup_barrier(mem_flags::mem_threadgroup);
+//    
+//    // Calculate tile center position in world space
+//    float2 tileCenterUV = float2(
+//        float(blockIdx.x * TILE_WIDTH + TILE_WIDTH/2) / float(width),
+//        float(blockIdx.y * TILE_HEIGHT + TILE_HEIGHT/2) / float(height)
+//    );
+//    
+//    // Convert to ray direction to get a center viewing direction for this tile
+//    float tileCenterTheta = tileCenterUV.x * 2.0 * M_PI_F;
+//    float tileCenterPhi = tileCenterUV.y * M_PI_F;
+//    float3 tileCenterDir;
+//    tileCenterDir.x = sin(tileCenterPhi) * cos(tileCenterTheta);
+//    tileCenterDir.y = cos(tileCenterPhi);
+//    tileCenterDir.z = sin(tileCenterPhi) * sin(tileCenterTheta);
+//    tileCenterDir = (params.viewMatrix * float4(tileCenterDir, 0)).xyz;
+//    
+//    // Define the full scene (same as original pathTracer)
+//    Scene fullScene = {
+//        .quads = {
+//            // Room walls, floor, ceiling
+//            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIELECTRIC, 0.0 },  // Back wall (blue)
+//            { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2), DIELECTRIC, 0.0 },  // Left wall (red)
+//            { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIELECTRIC, 0.0 },  // Right wall (green)
+//            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), DIELECTRIC, 0.0 },  // Floor (light gray)
+//            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), DIELECTRIC, 0.0 },  // Ceiling (light gray)
+//            
+//            // Tall box (metallic)
+//            { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Front face
+//            { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Left face
+//            { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Right face
+//            { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Back face
+//            { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },  // Top face
+//            
+//            // Short box (glass-like)
+//            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Front face
+//            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Left face
+//            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Right face
+//            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Back face
+//            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), METAL, 0.0 },  // Top face
+//        },
+//        .triangles = {
+//            { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
+//            { float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
+//        }
+//    };
+//    
+//    // Let each thread in the tile help with scene culling
+//    // Distribute quads among threads in the tile
+//    uint totalQuads = NUM_QUADS;
+//    uint quadsPerThread = (totalQuads + TILE_WIDTH * TILE_HEIGHT - 1) / (TILE_WIDTH * TILE_HEIGHT);
+//    uint quadStart = (tid.y * TILE_WIDTH + tid.x) * quadsPerThread;
+//    uint quadEnd = min(quadStart + quadsPerThread, totalQuads);
+//    
+//    // Cull quads visible to this tile
+//    for (uint i = quadStart; i < quadEnd; i++) {
+//        if (i < NUM_QUADS) {
+//            Quad quad = fullScene.quads[i];
+//            
+//            // Check if this quad potentially intersects with this tile's view frustum
+//            if (quadIntersectsTile(quad, params.cameraPosition, tileSize, 10.0f)) {
+//                // Add to the tile's visible objects
+//                uint index = atomic_fetch_add_explicit(&tileScene.quadCount, 1, memory_order_relaxed);
+//                if (index < MAX_QUADS_IN_TILE) {
+//                    tileScene.quads[index] = quad;
+//                }
+//            }
+//        }
+//    }
+//    
+//    // Distribute triangles among threads in the tile
+//    uint totalTriangles = NUM_LIGHTS;
+//    uint trianglesPerThread = (totalTriangles + TILE_WIDTH * TILE_HEIGHT - 1) / (TILE_WIDTH * TILE_HEIGHT);
+//    uint triangleStart = (tid.y * TILE_WIDTH + tid.x) * trianglesPerThread;
+//    uint triangleEnd = min(triangleStart + trianglesPerThread, totalTriangles);
+//    
+//    // Cull triangles visible to this tile (always include light sources)
+//    for (uint i = triangleStart; i < triangleEnd; i++) {
+//        if (i < NUM_LIGHTS) {
+//            Triangle triangle = fullScene.triangles[i];
+//            
+//            // Light sources should always be included
+//            if (triangle.isLightSource || 
+//                triangleIntersectsTile(triangle, params.cameraPosition, tileSize, 10.0f)) {
+//                // Add to the tile's visible objects
+//                uint index = atomic_fetch_add_explicit(&tileScene.triangleCount, 1, memory_order_relaxed);
+//                if (index < MAX_TRIANGLES_IN_TILE) {
+//                    tileScene.triangles[index] = triangle;
+//                }
+//            }
+//        }
+//    }
+//    
+//    // Wait for all threads to finish culling
+//    threadgroup_barrier(mem_flags::mem_threadgroup);
+//    
+//    // Now build a reduced scene with only the objects visible to this tile
+//    Scene tileReducedScene;
+//    
+//    // Copy all spheres (we don't cull spheres in this example)
+//    for (uint i = 0; i < NUM_SPHERES; i++) {
+//        tileReducedScene.spheres[i] = fullScene.spheres[i];
+//    }
+//    
+//    // Copy visible quads
+//    for (uint i = 0; i < min(tileScene.quadCount, (uint)MAX_QUADS_IN_TILE); i++) {
+//        if (i < NUM_QUADS) {
+//            tileReducedScene.quads[i] = tileScene.quads[i];
+//        }
+//    }
+//    
+//    // Fill remaining quads with empty placeholders if needed
+//    for (uint i = tileScene.quadCount; i < NUM_QUADS; i++) {
+//        tileReducedScene.quads[i] = (Quad){
+//            float3(0), float3(0), float3(0), float3(0), half3(0), DIFFUSE, 0
+//        };
+//    }
+//    
+//    // Copy visible triangles
+//    for (uint i = 0; i < min(tileScene.triangleCount, (uint)MAX_TRIANGLES_IN_TILE); i++) {
+//        if (i < NUM_LIGHTS) {
+//            tileReducedScene.triangles[i] = tileScene.triangles[i];
+//        }
+//    }
+//    
+//    // Fill remaining triangles with empty placeholders if needed
+//    for (uint i = tileScene.triangleCount; i < NUM_LIGHTS; i++) {
+//        tileReducedScene.triangles[i] = (Triangle){
+//            float3(0), float3(0), float3(0), half3(0), false, 0
+//        };
+//    }
+//    
+//    // Initialize RNG seed - add spatial and temporal variation
+//    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
+//    
+//    // Convert pixel coordinates to UV coordinates [0,1]
+//    float2 uv = float2(gid) / float2(width, height);
+//    
+//    // Add jitter for anti-aliasing - use halton sequence for better distribution
+//    float2 jitter = float2(
+//        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
+//        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
+//    ) / float2(width, height);
+//    
+//    uv += jitter;
+//    
+//    // Calculate ray origin and direction for this pixel
+//    float3 rayPosition = params.cameraPosition;
+//    float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
+//    float phi = (uv.y) * M_PI_F;   // latitude: 0 to π
+//    float3 rayDirection;
+//    rayDirection.x = sin(phi) * cos(theta);
+//    rayDirection.y = cos(phi);
+//    rayDirection.z = sin(phi) * sin(theta);
+//    rayDirection = (params.viewMatrix * float4(rayDirection, 0)).xyz;
+//    
+//    // Trace path using the reduced scene specific to this tile
+//    float3 color = pathTrace(rayPosition, rayDirection, tileReducedScene, rngState, frameIndex);
+//    
+//    // Apply gamma correction for display
+//    color = pow(color, float3(1.0/2.2));
+//    
+//    // Write to output texture
+//    output.write(float4(color, 1.0), gid);
+//}

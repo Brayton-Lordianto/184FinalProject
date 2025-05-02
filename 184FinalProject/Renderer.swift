@@ -562,7 +562,7 @@ actor Renderer {
             
             // Calculate threads and threadgroups
             // pretty standard setup for compute shaders
-            let threadsPerThreadgroup = MTLSize(width: 16, height: 16, depth: 1)
+            let threadsPerThreadgroup = MTLSize(width: 32, height: 8, depth: 1)
             let threadgroupCount = MTLSize(
                 width: (outputTexture.width + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
                 height: (outputTexture.height + threadsPerThreadgroup.height - 1) / threadsPerThreadgroup.height,
@@ -606,7 +606,7 @@ actor Renderer {
     // Method to set up and initialize compute components
     private func setupComputeComponents() {
         setupComputePipelines()
-        let resolution = 2048
+        let resolution = 1440
         createComputeOutputTexture(width: resolution, height: resolution)
     }
     
