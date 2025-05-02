@@ -71,6 +71,13 @@ typedef struct {
 } Scene;
 
 // RNG functions
+float rand(thread uint2& seed) {
+    seed = 1103515245 * ((seed.x >> 1) ^ seed.y);
+    seed.x += seed.y;
+    seed.y += seed.x;
+    return float(seed.x & 0x00FFFFFF) / float(0x01000000);
+}
+    
 uint wang_hash(uint seed) {
     seed = uint(seed ^ uint(61)) ^ uint(seed >> uint(16));
     seed *= uint(9);
@@ -440,7 +447,7 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     
     // Use the frameIndex parameter that's now passed from Swift
     uint frameIndex = params.frameIndex;
-    uint sampleCount = params.sampleCount;
+    //uint sampleCount = params.sampleCount;
 
     // Initialize Cornell box scene
     Scene scene = {
@@ -475,36 +482,81 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
             { float3(-1, 1.9, -2), float3(-1, 1.9, -4.5), float3(1, 1.9, -4.5), half3(1, 1, 1), true, 100.0 }
         }
     };
+    
+    float2 ndc = (float2(gid) + float2(0.5)) / float2(width, height) * 2.0 - 1.0;
+    ndc.y *= -1.0;
+    
+    float aspect = float(width) / float(height);
+    float px = ndc.x * tan(params.fovY * 0.5) * aspect;
+    float py = ndc.y * tan(params.fovY * 0.5);
+    float3 rayDir = normalize(float3(px, py, -1.0));
 
-    // Initialize RNG seed - add spatial and temporal variation
-    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
-    // Convert pixel coordinates to UV coordinates [0,1]
-    float2 uv = float2(gid) / float2(width, height);
-    // Add jitter for anti-aliasing - use halton sequence for better distribution
-    float2 jitter = float2(
-        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
-        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
-    ) / float2(width, height);
-    uv += jitter;
+    // Sample aperture
+    uint2 seed = gid * (frameIndex + 1);
+    float randR = sqrt(rand(seed));
+    float randTheta = 2.0 * M_PI_F * rand(seed);
+    float xLens = randR * cos(randTheta);
+    float yLens = randR * sin(randTheta);
+
+    // Astigmatism adjustment
+    float t = fmod(randTheta + params.AXIS * M_PI_F / 180.0, M_PI_F);
+    float phase = (t < M_PI_F / 2.0) ? t / (M_PI_F / 2.0) : (M_PI_F - t) / (M_PI_F / 2.0);
+    float eyePower = params.SPH + params.CYL * phase;
+    float adjustedFocalDist = params.focalDistance + 1.0 / eyePower;
+
+    float3 rayOrigin = float3(0.0);
+    float3 focalPoint = rayOrigin + adjustedFocalDist * rayDir;
+    float3 lensOffset = float3(xLens * params.lensRadius, yLens * params.lensRadius, 0.0);
+    float3 newOrigin = rayOrigin + lensOffset;
+    rayDir = normalize(focalPoint - newOrigin);
+
+    // Transform to world space
+    float4 originWS4 = params.viewMatrix * float4(newOrigin, 1.0);
+    float4 dirWS4 = params.viewMatrix * float4(rayDir, 0.0);
+    float3 originWS = originWS4.xyz;
+    float3 dirWS = normalize(dirWS4.xyz);
+
+    // Initialize RNG seed - ensure variation across pixels and frames
+    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + frameIndex * 26699) | 1;
+
+    float3 color = pathTrace(originWS, dirWS, scene, rngState, frameIndex);
     
-    // initialize ray direction
-    float3 rayPosition = params.cameraPosition;
-    float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
-    float phi = (uv.y) * M_PI_F;   // latitude: 0 to π 540
-    float3 rayDirection;
-    rayDirection.x = sin(phi) * cos(theta);
-    rayDirection.y = cos(phi);
-    rayDirection.z = sin(phi) * sin(theta);
-    rayDirection = (params.viewMatrix * float4(rayDirection, 0)).xyz; // Transform to world space
-    
-    // Trace path
-    float3 color = pathTrace(rayPosition, rayDirection, scene, rngState, frameIndex);
-    // Apply gamma correction for display
-    color = pow(color, float3(1.0/2.2));
+    // Apply gamma correction (for display)
+    color = pow(color, float3(1.0 / 2.2));
     // Write to output texture
-    // if not black
-//    if (length(color) > 0.0001) {
-    output.write(float4(color, 1.0), gid);
+    if (length(color) > 0.0001) {
+        output.write(float4(color, 1.0), gid);
+    }
+
+//    // Initialize RNG seed - add spatial and temporal variation
+//    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
+//    // Convert pixel coordinates to UV coordinates [0,1]
+//    float2 uv = float2(gid) / float2(width, height);
+//    // Add jitter for anti-aliasing - use halton sequence for better distribution
+//    float2 jitter = float2(
+//        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
+//        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
+//    ) / float2(width, height);
+//    uv += jitter;
+//    
+//    // initialize ray direction
+//    float3 rayPosition = params.cameraPosition;
+//    float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
+//    float phi = (uv.y) * M_PI_F;   // latitude: 0 to π 540
+//    float3 rayDirection;
+//    rayDirection.x = sin(phi) * cos(theta);
+//    rayDirection.y = cos(phi);
+//    rayDirection.z = sin(phi) * sin(theta);
+//    rayDirection = (params.viewMatrix * float4(rayDirection, 0)).xyz; // Transform to world space
+//    
+//    // Trace path
+//    float3 color = pathTrace(rayPosition, rayDirection, scene, rngState, frameIndex);
+//    // Apply gamma correction for display
+//    color = pow(color, float3(1.0/2.2));
+//    // Write to output texture
+//    // if not black
+////    if (length(color) > 0.0001) {
+//    output.write(float4(color, 1.0), gid);
 //    }
 }
 

@@ -598,6 +598,12 @@ actor Renderer {
                 viewMatrix: viewMatrix,
                 fovY: fovY,
                 modelTriangleCount: UInt32(mesh.submeshes.count),
+                
+                lensRadius: 0.1,
+                focalDistance: 4.0,
+                SPH: -2.0,            // for myopia
+                CYL: 1.5,             // astigmatism strength
+                AXIS: 90.0            // astigmatism angle
             )
             
             // Calculate threads and threadgroups
