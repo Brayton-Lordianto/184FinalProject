@@ -21,22 +21,19 @@ kernel void accumulationKernel(texture2d<float, access::read> currentFrame [[tex
     }
     float4 currentSample = currentFrame.read(gid);
     
-    // Special case for first sample or reset
+    // first sample or reset
     if (sampleCount <= 1) {
         output.write(currentSample, gid);
         return;
     }
     
-    // Read accumulated value
-    float4 accumulatedValue = accumulatedFrames.read(gid);
     
     // Calculate running average
     // Formula: new_avg = old_avg + (new_sample - old_avg) / sample_count
     // This is mathematically equivalent to: (old_avg * (n-1) + new_sample) / n
     // But has better numerical stability with high sample counts
+    float4 accumulatedValue = accumulatedFrames.read(gid);
     float4 newAccumulatedValue = accumulatedValue + (currentSample - accumulatedValue) / float(sampleCount);
-    
-    // Store the result
     output.write(newAccumulatedValue, gid);
 }
 

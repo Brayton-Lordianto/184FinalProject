@@ -126,7 +126,7 @@ actor Renderer {
         vertexDescriptor.attributes[2].offset = MemoryLayout.offset(of: \Vertex.normal)!
         vertexDescriptor.attributes[2].bufferIndex = 30
         let textureLoader = MTKTextureLoader(device: layerRenderer.device)
-        let cornellURL = Bundle.main.url(forResource: "Cornell_Box", withExtension: "usdz")!
+        let cornellURL = Bundle.main.url(forResource: "Cornell_Box_2", withExtension: "usdz")!
         self.obj = Model()
         self.obj!.loadModel(device: device, url: cornellURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
         
@@ -331,6 +331,7 @@ actor Renderer {
     private var accumulationTexture: MTLTexture?
     private var pathTracerOutputTexture: MTLTexture?
     private var sampleCount: UInt32 = 0
+    private var camMovement: Float = 0
     private var lastFrameTime: Double = 0
     private var isMoving: Bool = false
     
@@ -603,8 +604,9 @@ actor Renderer {
             }
             
             // Update last camera position
-            lastCameraPosition = currentCameraPosition
             sampleCount += 1
+            camMovement = length(currentCameraPosition - (lastCameraPosition ?? SIMD3<Float>(0, 0, 0)))
+            lastCameraPosition = currentCameraPosition
             let cameraPosition = viewMatrix.columns.3.xyz
             let projection = drawable.computeProjection(viewIndex: 0)
             let fovY = 2.0 * atan(1.0 / projection.columns.1.y)
@@ -646,6 +648,8 @@ actor Renderer {
             guard let accumEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
             accumEncoder.setComputePipelineState(accumulationPipeline)
             accumEncoder.setBytes(&sampleCount, length: MemoryLayout<UInt32>.size, index: 0)
+            // for cam movement if using adaptive -- on headset without adaptive is better.
+//            accumEncoder.setBytes(&camMovement, length: MemoryLayout<Float>.size, index: 1)
             accumEncoder.setTexture(pathTracerOutput, index: 0)
             accumEncoder.setTexture(accumTexture, index: 1)
             accumEncoder.setTexture(outputTexture, index: 2)
