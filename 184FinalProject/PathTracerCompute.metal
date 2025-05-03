@@ -435,18 +435,7 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
 // Standard compute shader path tracing implementation (original)
 kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0)]],
                              constant ComputeParams &params [[buffer(0)]],
-                             uint2 gid [[thread_position_in_grid]]) {
-    // Get dimensions
-    uint width = output.get_width();
-    uint height = output.get_height();
-
-    if (gid.x >= width || gid.y >= height) {
-        return;
-    }
-
-    uint frameIndex = params.frameIndex;
-    uint sampleCount = params.sampleCount;
-
+                              uint2 gid [[thread_position_in_grid]]) {
     // Scene setup: Cornell box
     Scene scene = {
         .quads = {
@@ -455,14 +444,14 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
             { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIELECTRIC, 0.0 },  // Right wall
             { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Floor
             { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Ceiling
-
+            
             // Tall metallic box
             { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
             { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
             { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
             { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
             { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
-
+            
             // Short glass box
             { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },
             { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },
@@ -476,89 +465,42 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
             { float3(-1, 1.9, -2), float3(-1, 1.9, -4.5), float3(1, 1.9, -4.5), half3(1, 1, 1), true, 100.0 }
         }
     };
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
 
-    // Jitter for anti-aliasing (Halton)
-    float2 jitter = float2(
-        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
-        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
-    ) / float2(width, height);
+    float2 uv = float2(gid) / float2(output.get_width(), output.get_height());
 
-    // Convert pixel coordinates to UV [0,1], with Halton jitter for anti-aliasing
-    float2 uv = (float2(gid) + float2(0.5) + jitter) / float2(width, height);
+    float rndR = fract(sin(dot(float2(gid), float2(12.9898, 78.233))) * 43758.5453);
+    float rndTheta = 2.0 * M_PI_F * fract(sin(dot(float2(gid.yx), float2(93.9898, 67.345))) * 12345.6789);
+    float r = sqrt(rndR);
+    float2 lens_disk = params.lensRadius * r * float2(cos(rndTheta), sin(rndTheta));
 
-    // Equirectangular ray direction (unit sphere)
-    float theta = uv.x * 2.0 * M_PI_F; // longitude
-    float phi = uv.y * M_PI_F;        // latitude
-    float3 rayDirView;
-    rayDirView.x = sin(phi) * cos(theta);
-    rayDirView.y = cos(phi);
-    rayDirView.z = sin(phi) * sin(theta);
+    // Convert pixel to sensor plane position in camera space
+    float x_sensor = (uv.x - 0.5) * 2.0 * tan(params.fovX * 0.5);
+    float y_sensor = (0.5 - uv.y) * 2.0 * tan(params.fovY * 0.5);
+    float3 sensor_cam = float3(x_sensor, y_sensor, -1.0); // camera looks down -Z
+    float3 lens_offset_cam = float3(lens_disk, 0.0);       // lens offset in camera space
+
+    // Compute ray direction and origin in camera space
+    float3 sensor_dir_cam = normalize(sensor_cam - lens_offset_cam);
     
-    // Sample lens position
-    uint2 seed = gid * (frameIndex + 1);
-    float randR = sqrt(rand(seed));
-    float randTheta = 2.0 * M_PI_F * rand(seed);
-    float xLens = randR * cos(randTheta);
-    float yLens = randR * sin(randTheta);
+    // Extract rotation (inverse of view's rotation = camera-to-world rotation)
+    float3x3 viewRot = float3x3(params.viewMatrix[0].xyz,
+                                params.viewMatrix[1].xyz,
+                                params.viewMatrix[2].xyz);
+    float3x3 cameraToWorldRot = transpose(viewRot); // inverse of rotation
 
-    // Astigmatism phase and eye power
-    float t = fmod(randTheta + params.AXIS * M_PI_F / 180.0, M_PI_F);
-    float phase = (t < M_PI_F / 2.0) ? t / (M_PI_F / 2.0) : (M_PI_F - t) / (M_PI_F / 2.0);
-    float eyePower = params.SPH + params.CYL * phase;
-    float adjustedFocalDist = params.focalDistance + 1.0 / eyePower;
+    // Rotate to world space
+    float3 ray_origin = params.cameraPosition + (cameraToWorldRot * lens_offset_cam);
+    float3 ray_dir = normalize(cameraToWorldRot * sensor_dir_cam);
 
-    // Compute lens offset and final ray
-    float3 focalPoint = float3(0.0) + adjustedFocalDist * rayDirView;
-    float3 lensOffset = float3(xLens * params.lensRadius, yLens * params.lensRadius, 0.0);
-    float3 rayOriginView = float3(0.0) + lensOffset;
-    float3 rayDirFinal = normalize(focalPoint - rayOriginView);
+    // RNG seed
+    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.frameIndex * 26699) | 1;
 
-    // Transform to world space
-    float3 rayPosition = (params.viewMatrix * float4(rayOriginView, 1.0)).xyz;
-    float3 rayDirection = normalize((params.viewMatrix * float4(rayDirFinal, 0.0)).xyz);
-    
-    // RNG and path tracing
-    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + frameIndex * 26699) | 1;
-    float3 color = pathTrace(rayPosition, rayDirection, scene, rngState, frameIndex);
+    // Trace the ray
+    float3 color = pathTrace(ray_origin, ray_dir, scene, rngState, params.frameIndex);
 
-    // Gamma correction and output
-    color = pow(color, float3(1.0 / 2.2));
-    if (length(color) > 0.0001) {
-        output.write(float4(color, 1.0), gid);
-    }
-
-
-
-//    // Initialize RNG seed - add spatial and temporal variation
-//    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
-//    // Convert pixel coordinates to UV coordinates [0,1]
-//    float2 uv = float2(gid) / float2(width, height);
-//    // Add jitter for anti-aliasing - use halton sequence for better distribution
-//    float2 jitter = float2(
-//        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
-//        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
-//    ) / float2(width, height);
-//    uv += jitter;
-//    
-//    // initialize ray direction
-//    float3 rayPosition = params.cameraPosition;
-//    float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
-//    float phi = (uv.y) * M_PI_F;   // latitude: 0 to π 540
-//    float3 rayDirection;
-//    rayDirection.x = sin(phi) * cos(theta);
-//    rayDirection.y = cos(phi);
-//    rayDirection.z = sin(phi) * sin(theta);
-//    rayDirection = (params.viewMatrix * float4(rayDirection, 0)).xyz; // Transform to world space
-//    
-//    // Trace path
-//    float3 color = pathTrace(rayPosition, rayDirection, scene, rngState, frameIndex);
-//    // Apply gamma correction for display
-//    color = pow(color, float3(1.0/2.2));
-//    // Write to output texture
-//    // if not black
-////    if (length(color) > 0.0001) {
-//    output.write(float4(color, 1.0), gid);
-//    }
+    // No gamma correction here
+    output.write(float4(color, 1.0), gid);
 }
 
 // Constants for tile size

@@ -44,14 +44,28 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                texture2d<half> colorMap     [[ texture(TextureIndexColor) ]])
 {
     // MARK: test compute shader
-    float4 computeColor = computeTexture.sample(sampler(filter::linear),
-      in.texCoord);
+//    float4 computeColor = computeTexture.sample(sampler(filter::linear),
+//      in.texCoord);
+////    return computeColor;
+//    // if color is black,
+//    if (computeColor.r == 0.0 && computeColor.g == 0.0 && computeColor.b == 0.0)
+//    {
+//        discard_fragment();
+//    }
 //    return computeColor;
-    // if color is black,
-    if (computeColor.r == 0.0 && computeColor.g == 0.0 && computeColor.b == 0.0)
-    {
-        discard_fragment();
-    }
-    return computeColor;
+    constexpr sampler linearSampler(filter::linear, address::clamp_to_edge);
+
+    // Sample the linear HDR color from the accumulated path traced image
+    float3 hdrColor = computeTexture.sample(linearSampler, in.texCoord).rgb;
+
+    // Optional: simple Reinhard tone mapping to prevent overbright pixels
+    float3 toneMapped = hdrColor / (hdrColor + 1.0);
+
+    // Apply gamma correction (linear → sRGB)
+    float3 gammaCorrected = pow(toneMapped, float3(1.0 / 2.2));
+
+    return float4(gammaCorrected, 1.0);
     // MARK: end test compute shader
 }
+
+
