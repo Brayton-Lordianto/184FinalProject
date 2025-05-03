@@ -470,7 +470,8 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene,
 kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0)]],
                              constant ComputeParams &params [[buffer(0)]],
                              constant GPUTriangle* modelTriangles [[buffer(1)]],
-                             uint2 gid [[thread_position_in_grid]]) {
+                             uint2 gid [[thread_position_in_grid]]) {    
+    
     // Get dimensions
     uint width = output.get_width();
     uint height = output.get_height();
@@ -514,6 +515,7 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     uv += jitter;
     
     // initialize ray direction
+    
     float3 rayPosition = params.cameraPosition;
     float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
     float phi = (uv.y) * M_PI_F;   // latitude: 0 to π 540

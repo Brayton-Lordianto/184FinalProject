@@ -78,7 +78,10 @@ func convertModelToShaderScene(model: Model) -> [Triangle] {
     if Globals.shared.name == AppModel.ModelType.originalCornellBox.filename {
         model.rotation = SIMD3<Float>(-90, 0, 0)
     }
-    model.position -= SIMD3<Float>(0, 0.5, 0)
+//     later make the custom cornell box really big and enclosing you.
+    if Globals.shared.name != AppModel.ModelType.customCornellBox.filename {
+        model.position += Globals.shared.modelCenter
+    }
     
     
     var triangles = [Triangle]()

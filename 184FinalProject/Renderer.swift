@@ -481,16 +481,24 @@ actor Renderer {
         return newTargets
     }
     
-    private func updateGameState(drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) {
+    private func updateGameState(drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) async {
         /// Update any game state before rendering
+
+        // Create rotation matrices from AppModel rotation values
+        // MARK: doing it here does not result in local rotations. adding a translation does not help.
+        let rotationMatrixX = await matrix4x4_rotation(radians: radians_from_degrees(appModel.rotationX), axis: SIMD3<Float>(1, 0, 0))
+        let rotationMatrixY = await matrix4x4_rotation(radians: radians_from_degrees(appModel.rotationY), axis: SIMD3<Float>(0, 1, 0))
+        let rotationMatrixZ = await matrix4x4_rotation(radians: radians_from_degrees(appModel.rotationZ), axis: SIMD3<Float>(0, 0, 1))
         
-        let rotationAxis = SIMD3<Float>(1, 1, 0)
-        let modelRotationMatrix = matrix4x4_rotation(radians: rotation, axis: rotationAxis)
-//        let modelTranslationMatrix = matrix4x4_translation(0.0, 0.0, -8.0)
-        let modelTranslationMatrix = matrix4x4_translation(0, 0, 0)
+        // Combine all rotation matrices
+        let modelRotationMatrix = rotationMatrixX * rotationMatrixY * rotationMatrixZ
+        
+        let c = Globals.shared.modelCenter
+        let modelTranslationMatrix = matrix4x4_translation(c.x, c.y, c.z)
         let modelScaleMatrix = matrix4x4_scale(-1, 1, 1)
-        //        let modelMatrix = modelTranslationMatrix * modelRotationMatrix
-        let modelMatrix = modelTranslationMatrix * modelScaleMatrix
+        
+        // Apply rotation to the model matrix
+        let modelMatrix = modelTranslationMatrix * modelRotationMatrix * modelScaleMatrix
         
         let simdDeviceAnchor = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
         
@@ -506,11 +514,9 @@ actor Renderer {
         if drawable.views.count > 1 {
             self.uniforms[0].uniforms.1 = uniforms(forViewIndex: 1)
         }
-        
-        rotation += 0.01
     }
     
-    func renderFrame() {
+    func renderFrame() async {
         /// Per frame updates hare
         
         guard let frame = layerRenderer.queryNextFrame() else { return }
@@ -533,7 +539,7 @@ actor Renderer {
             semaphore.signal()
         }
         self.updateDynamicBufferState()
-        self.updateGameState(drawable: drawable, deviceAnchor: deviceAnchor)
+        await self.updateGameState(drawable: drawable, deviceAnchor: deviceAnchor)
         let renderPassDescriptor = MTLRenderPassDescriptor()
         if rasterSampleCount > 1 {
             let renderTargets = memorylessRenderTargets(drawable: drawable)
@@ -714,7 +720,7 @@ actor Renderer {
             copyEncoder.copy(from: denoiseTexture, to: accumTexture)
             copyEncoder.endEncoding()
             
-            print("Rendering sample \(sampleCount) with \(triangleCount) model triangles")
+//            print("Rendering sample \(sampleCount) with \(triangleCount) model triangles")
         }
         
         renderEncoder.popDebugGroup()
@@ -732,7 +738,7 @@ actor Renderer {
         createComputeOutputTexture(width: resolution, height: resolution)
     }
     
-    func renderLoop() {
+    func renderLoop() async {
         // Set up compute components at the start of the render loop
         setupComputeComponents()
         
@@ -755,9 +761,9 @@ actor Renderer {
                         appModel.immersiveSpaceState = .open
                     }
                 }
-                autoreleasepool {
-                    self.renderFrame()
-                }
+//                autoreleasepool {
+                    await self.renderFrame()
+//                }
             }
         }
     }

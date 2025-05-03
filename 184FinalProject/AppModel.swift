@@ -42,5 +42,11 @@ class AppModel {
         }
     }
     
-    var selectedModel: ModelType = .originalCornellBox
+    var selectedModel: ModelType = .customCornellBox
+    
+    
+    // add rotations
+    var rotationX: Float = 0.0
+    var rotationY: Float = 0.0
+    var rotationZ: Float = 0.0
 }
