@@ -13,7 +13,7 @@ import RealityKitContent
 class Globals {
     private init() {}
     public static let shared = Globals()
-    var name: String = AppModel.ModelType.customCornellBox.rawValue
+    var name: String = AppModel.ModelType.customCornellBox.filename
     // we center the models differently for rotation around that axis
     let modelCenter: SIMD3<Float> = SIMD3<Float>(0, -0.5, 0)
     // store rotations globally
@@ -28,14 +28,17 @@ struct ContentView: View {
     let rotationRange: ClosedRange<Float> = -90...90.0
     
     var body: some View {
-        VStack {
+        ScrollView {
             if appModel.immersiveSpaceState == .closed {
+                ToggleImmersiveSpaceButton()
+                    .padding()
+                
                 Model3D(named: "rubiks_cube")
-                .padding()
+                    .padding()
                 // rotate by rotations in app model
-                .rotation3DEffect(.init(degrees: Double(appModel.rotationX)), axis: (1, 0, 0))
-                .rotation3DEffect(.init(degrees: Double(appModel.rotationY)), axis: (0, 1, 0))
-                .rotation3DEffect(.init(degrees: Double(appModel.rotationZ)), axis: (0, 0, 1))
+                    .rotation3DEffect(.init(degrees: Double(appModel.rotationX)), axis: (1, 0, 0))
+                    .rotation3DEffect(.init(degrees: Double(appModel.rotationY)), axis: (0, 1, 0))
+                    .rotation3DEffect(.init(degrees: Double(appModel.rotationZ)), axis: (0, 0, 1))
             }
             
             Text("Select Model for Path Tracing")
@@ -43,7 +46,7 @@ struct ContentView: View {
                 .padding(.bottom, 8)
             
             @Bindable var bindableAppModel = appModel
-                       
+            
             Picker("Model", selection: $bindableAppModel.selectedModel) {
                 ForEach(AppModel.ModelType.allCases) { modelType in
                     Text(modelType.rawValue).tag(modelType)
@@ -110,21 +113,24 @@ struct ContentView: View {
                               appModel.immersiveSpaceState == .inTransition)
                 }
             }
-
+            
             
             
             
             ToggleImmersiveSpaceButton()
                 .padding()
             
-            .onChange(of: bindableAppModel.selectedModel) { _, newValue in
-                Globals.shared.name = newValue.filename
-            }
-            .onChange(of: bindableAppModel.immersiveSpaceState) { _, _ in
-                Globals.shared.rotationX = bindableAppModel.rotationX
-                Globals.shared.rotationY = bindableAppModel.rotationY
-                Globals.shared.rotationZ = bindableAppModel.rotationZ
-            }
+                .onChange(of: bindableAppModel.selectedModel) { _, newValue in
+                    Globals.shared.name = newValue.filename
+                }
+                .onChange(of: bindableAppModel.immersiveSpaceState) { _, _ in
+                    Globals.shared.rotationX = bindableAppModel.rotationX
+                    Globals.shared.rotationY = bindableAppModel.rotationY
+                    Globals.shared.rotationZ = bindableAppModel.rotationZ
+                }
+                .onAppear {
+//                    AccessibilitySettings.prefersHeadAnchorAlternative = false. 
+                }
         }
         .padding()
     }

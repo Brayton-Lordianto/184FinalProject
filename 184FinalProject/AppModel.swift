@@ -51,7 +51,7 @@ class AppModel {
     var rotationZ: Float = 0.0
     
     // shader options
-    var useViewMatrix: Bool = true
+    var useViewMatrix: Bool = false
     
     // Resolution options
     enum Resolution: Int, CaseIterable, Identifiable {
