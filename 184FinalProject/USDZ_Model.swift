@@ -2,11 +2,11 @@
 import MetalKit
 
 func getMaterial(_ mdlSubmesh: MDLSubmesh) -> Material {
-    let materialName = mdlSubmesh.material?.name ?? "No Material"
-    let baseColor = mdlSubmesh.material?.property(with: .baseColor)?.float3Value ?? float3(1.0)
+    _ = mdlSubmesh.material?.name ?? "No Material"
+    let baseColor = mdlSubmesh.material?.property(with: .baseColor)?.float3Value ?? SIMD3<Float>(repeating: 1.0)
     let roughness = mdlSubmesh.material?.property(with: .roughness)?.floatValue ?? 1.0
     let indexOfRefraction = mdlSubmesh.material?.property(with: .materialIndexOfRefraction)?.floatValue ?? 1.0
-    let emission = mdlSubmesh.material?.property(with: .emission)?.float3Value ?? float3(0.0)
+    let emission = mdlSubmesh.material?.property(with: .emission)?.float3Value ?? SIMD3<Float>(repeating: 0.0)
     let metallic = mdlSubmesh.material?.property(with: .metallic)?.floatValue ?? 0.0
     var material = Material()
     
@@ -27,6 +27,7 @@ func getMaterial(_ mdlSubmesh: MDLSubmesh) -> Material {
     material.isLightSource = emission.x > 0.0 || emission.y > 0.0 || emission.z > 0.0
     material.intensity = max(emission.x, max(emission.y, emission.z))
     material.roughness = roughness
+    print("base color is \(baseColor), roughness is \(roughness), metallic is \(metallic), IOR is \(indexOfRefraction)")
     return material
 }
 

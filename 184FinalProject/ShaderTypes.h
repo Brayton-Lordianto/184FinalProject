@@ -80,6 +80,13 @@ typedef struct {
     uint32_t modelTriangleCount; // Number of active model triangles
 } ComputeParams;
 
+typedef struct {
+    float denoiseStrength;    // 0.0 to 1.0 (higher = more aggressive denoising)
+    float spatialVariance;    // Controls filter spatial spread
+    float colorThreshold;     // Threshold for color similarity
+    uint32_t sampleCount;     // Current sample count
+} DenoiseParams;
+
 
 #endif /* ShaderTypes_h */
 

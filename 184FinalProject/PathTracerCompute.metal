@@ -488,11 +488,19 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     // now we'll rely on model triangles passed from Swift
     Scene scene = {
         .lights = {
-            { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
-            ,{ float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
+//            { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
+//            ,{ float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
             { float3(-1, 1.9, -2), float3(-1, 1.9, -4.5), float3(1, 1.9, -4.5), half3(1, 1, 1), true, 100.0 }
         }
     };
+    // for each triangle, if it is a light, add to scene lights
+    uint j = 0;
+    for (uint i = 0; i < modelTriangleCount; i++) {
+        GPUTriangle gpuTriangle = modelTriangles[i];
+        if (gpuTriangle.isLightSource) {
+            scene.lights[j++] = convertGPUTriangle(gpuTriangle);
+        }
+    }
 
     // Initialize RNG seed - add spatial and temporal variation
     uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
@@ -517,11 +525,8 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     
     // Trace path with model triangles
     float3 color = pathTrace(rayPosition, rayDirection, scene, modelTriangles, modelTriangleCount, rngState, frameIndex);
-    
     // Apply gamma correction for display
     color = pow(color, float3(1.0/2.2));
-    
-    // Write to output texture
     output.write(float4(color, 1.0), gid);
 }
 

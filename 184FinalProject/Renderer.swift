@@ -126,13 +126,18 @@ actor Renderer {
         vertexDescriptor.attributes[2].offset = MemoryLayout.offset(of: \Vertex.normal)!
         vertexDescriptor.attributes[2].bufferIndex = 30
         let textureLoader = MTKTextureLoader(device: layerRenderer.device)
-        let cornellURL = Bundle.main.url(forResource: "Cornell_Box_2", withExtension: "usdz")!
+//        let cornellURL = Bundle.main.url(forResource: "Cornell_Box_2", withExtension: "usdz")!
+//         let url = cornellURL
+        var name = "CornellTest"
+        name = "bunny"
+        let url = Bundle.main.url(forResource: name, withExtension: "usdz")!
+
         self.obj = Model()
-        self.obj!.loadModel(device: device, url: cornellURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
+        self.obj!.loadModel(device: device, url: url, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
         
         // Convert model to shader-compatible triangles
-        let triangles = convertModelToShaderScene(model: self.obj!)
-        print("Model converted to \(triangles.count) triangles")
+        var triangles = convertModelToShaderScene(model: self.obj!)
+//        triangles = scaleModelToScene(triangles)
         
         // Create GPU triangles for passing to shader
         var gpuTriangles = triangles.map { GPUTriangle(from: $0) }
@@ -334,10 +339,14 @@ actor Renderer {
     // MARK: compute pipeline
     private var accumulationTexture: MTLTexture?
     private var pathTracerOutputTexture: MTLTexture?
+    private var denoisedTexture: MTLTexture?    // New texture for denoised output
     private var sampleCount: UInt32 = 0
     private var camMovement: Float = 0
     private var lastFrameTime: Double = 0
     private var isMoving: Bool = false
+    
+    // Flag to use enhanced denoiser (more quality but slightly more expensive)
+    private var useEnhancedDenoiser: Bool = true
     
     private func setupComputePipelines() {
         guard let library = device.makeDefaultLibrary() else { return }
@@ -346,7 +355,6 @@ actor Renderer {
         if let function = library.makeFunction(name: "pathTracerCompute") {
             do {
                 let pipeline = try device.makeComputePipelineState(function: function)
-                computePipelines["pathTracerCompute"] = pipeline
                 computePipelines["pathTracerCompute"] = pipeline
             } catch {
                 print("Failed to create compute pipeline for pathTracerCompute: \(error)")
@@ -362,10 +370,30 @@ actor Renderer {
                 print("Failed to create compute pipeline for accumulationKernel: \(error)")
             }
         }
+        
+        // Create basic real-time denoising pipeline
+        if let function = library.makeFunction(name: "fastDenoiseKernel") {
+            do {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                computePipelines["fastDenoiseKernel"] = pipeline
+            } catch {
+                print("Failed to create compute pipeline for fastDenoiseKernel: \(error)")
+            }
+        }
+        
+        // Create enhanced real-time denoising pipeline
+        if let function = library.makeFunction(name: "enhancedDenoiseKernel") {
+            do {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                computePipelines["enhancedDenoiseKernel"] = pipeline
+            } catch {
+                print("Failed to create compute pipeline for enhancedDenoiseKernel: \(error)")
+            }
+        }
     }
     
     private func createComputeOutputTexture(width: Int, height: Int) {
-        // Create three textures with the same descriptor setup
+        // Create textures with the same descriptor setup
         let createTexture = { () -> MTLTexture? in
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .rgba32Float,
@@ -377,10 +405,11 @@ actor Renderer {
             return self.device.makeTexture(descriptor: descriptor)
         }
         
-        // Create textures
-        computeOutputTexture = createTexture()       // Final output texture shown to the user
-        pathTracerOutputTexture = createTexture()    // Single sample from pathTracer
+        // Create textures for each stage of the pipeline
+        pathTracerOutputTexture = createTexture()    // Raw output from pathTracer
         accumulationTexture = createTexture()        // Accumulated results
+        denoisedTexture = createTexture()            // Denoised output
+        computeOutputTexture = createTexture()       // Final output texture shown to the user
         
         // Reset sample count when creating new textures
         resetAccumulation()
@@ -576,9 +605,11 @@ actor Renderer {
         func dispatchComputeCommands(commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) {
             guard let pathTracerPipeline = computePipelines["pathTracerCompute"],
                   let accumulationPipeline = computePipelines["accumulationKernel"],
+                  let denoisePipeline = computePipelines["fastDenoiseKernel"],
                   let outputTexture = computeOutputTexture,
                   let pathTracerOutput = pathTracerOutputTexture,
-                  let accumTexture = accumulationTexture else {
+                  let accumTexture = accumulationTexture,
+                  let denoiseTexture = denoisedTexture else {
                 return
             }
             
@@ -652,17 +683,31 @@ actor Renderer {
             guard let accumEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
             accumEncoder.setComputePipelineState(accumulationPipeline)
             accumEncoder.setBytes(&sampleCount, length: MemoryLayout<UInt32>.size, index: 0)
-            // for cam movement if using adaptive -- on headset without adaptive is better.
-//            accumEncoder.setBytes(&camMovement, length: MemoryLayout<Float>.size, index: 1)
             accumEncoder.setTexture(pathTracerOutput, index: 0)
             accumEncoder.setTexture(accumTexture, index: 1)
-            accumEncoder.setTexture(outputTexture, index: 2)
+            accumEncoder.setTexture(denoiseTexture, index: 2) // Now write to denoise texture instead of final output
             accumEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
             accumEncoder.endEncoding()
             
-            // accumulated result for next frame
+            // PASS 3: Denoising Pass - apply real-time denoising to the accumulated result
+            guard let denoiseEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+            
+            // Select which denoiser to use based on the flag
+            if useEnhancedDenoiser, let enhancedPipeline = computePipelines["enhancedDenoiseKernel"] {
+                denoiseEncoder.setComputePipelineState(enhancedPipeline)
+            } else {
+                denoiseEncoder.setComputePipelineState(denoisePipeline)
+            }
+            
+            denoiseEncoder.setBytes(&sampleCount, length: MemoryLayout<UInt32>.size, index: 0)
+            denoiseEncoder.setTexture(denoiseTexture, index: 0) // Input is the accumulated result
+            denoiseEncoder.setTexture(outputTexture, index: 1)  // Output is the final displayed texture
+            denoiseEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
+            denoiseEncoder.endEncoding()
+            
+            // Copy accumulated result for next frame
             guard let copyEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
-            copyEncoder.copy(from: outputTexture, to: accumTexture)
+            copyEncoder.copy(from: denoiseTexture, to: accumTexture)
             copyEncoder.endEncoding()
             
             print("Rendering sample \(sampleCount) with \(triangleCount) model triangles")

@@ -61,15 +61,32 @@ struct GPUTriangle {
         self.intensity = triangle.intensity
         self.materialType = Int32(triangle.material.rawValue)
         self.roughness = triangle.roughness
+        
+        print("created triangle with parameters \(triangle.p1), \(triangle.p2), \(triangle.p3), \(triangle.color), \(triangle.isLightSource), \(triangle.intensity), \(triangle.material.rawValue), \(triangle.roughness)")
     }
 }
 
+func additionalVertexPositionProcessing(_ position: SIMD3<Float>) -> SIMD3<Float> {
+    // Apply additional processing to the vertex position if needed
+    // Add z offset so it fits in front of the camera
+    var p = position + SIMD3<Float>(0, 0, -5)
+    return p
+}
+
 func convertModelToShaderScene(model: Model) -> [Triangle] {
+    // MARK: CORRECTION FROM PARSING ISSUE
+    model.rotation = SIMD3<Float>(0, 0, 0)
+    model.position -= SIMD3<Float>(0, 0.5, 0)
+    
+    
     var triangles = [Triangle]()
     var modelMatrix = matrix_identity_float4x4
     translateMatrix(matrix: &modelMatrix, position: model.position)
     rotateMatrix(matrix: &modelMatrix, rotation: toRadians(from: model.rotation))
     scaleMatrix(matrix: &modelMatrix, scale: model.scale)
+    
+    
+    
     
     for (meshIndex, mesh) in model.meshes.enumerated() {
         // Note: Using buffer index 30 as specified in vertex descriptor
@@ -110,8 +127,7 @@ func convertModelToShaderScene(model: Model) -> [Triangle] {
                     let vertex = vertexPtr.bindMemory(to: Vertex.self, capacity: 1).pointee
                     let position = vertex.position
                     let transformedPosition = applyTransform(position, modelMatrix: modelMatrix)
-                    // Add z offset so it fits in front of the camera
-                    vertices[j] = transformedPosition + SIMD3<Float>(0, 0, -5)
+                    vertices[j] = additionalVertexPositionProcessing(transformedPosition)
                 }
                 
                 let triangle = Triangle(
