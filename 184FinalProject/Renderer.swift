@@ -588,7 +588,10 @@ actor Renderer {
             sampleCount += 1
             let cameraPosition = viewMatrix.columns.3.xyz
             let projection = drawable.computeProjection(viewIndex: 0)
-            let fovY = 2.0 * atan(1.0 / projection.columns.1.y)
+//            let fovY = 2.0 * atan(1.0 / projection.columns.1.y)
+//            let fovX = 2.0 * atan(1.0 / projection.columns.0.x)
+            let fovY = radians_from_degrees(95.0)
+            let fovX = radians_from_degrees(115.0)
             var params = ComputeParams(
                 time: computeTime,
                 resolution: SIMD2<Float>(Float(outputTexture.width), Float(outputTexture.height)),
@@ -597,13 +600,14 @@ actor Renderer {
                 cameraPosition: cameraPosition,
                 viewMatrix: viewMatrix,
                 fovY: fovY,
+                fovX: fovX,
                 modelTriangleCount: UInt32(mesh.submeshes.count),
                 
-                lensRadius: 0.1,
+                lensRadius: 0.0,
                 focalDistance: 4.0,
-                SPH: -2.0,            // for myopia
+                SPH: 0.0,            // for myopia
                 CYL: 1.5,             // astigmatism strength
-                AXIS: 90.0            // astigmatism angle
+                AXIS: 45.0            // astigmatism angle
             )
             
             // Calculate threads and threadgroups
