@@ -538,14 +538,29 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
                            ) / float2(width, height);
     
     float2 uv = (float2(gid) + float2(0.5) + jitter) / float2(width, height);
-    
-    // === Convert to NDC and compute sensor plane position
-    float2 ndc = uv * 2.0 - 1.0;
-    ndc.y *= -1.0;
 
-    float sensorX = ndc.x * tan(params.fovX * 0.5);
-    float sensorY = ndc.y * tan(params.fovY * 0.5);
-    float3 sensorPosCam = float3(sensorX, sensorY, -1.0);
+    float3 rayPosition = params.cameraPosition;
+    float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
+    float phi = (uv.y) * M_PI_F;   // latitude: 0 to π
+    float3 rayDirection;
+    rayDirection.x = sin(phi) * cos(theta);
+    rayDirection.y = cos(phi);
+    rayDirection.z = sin(phi) * sin(theta);
+
+    // Convert to camera space
+    float3 camRayOrigin = (params.viewMatrix * float4(rayPosition, 1.0)).xyz;
+    float3 camRayDirection = normalize((params.viewMatrix * float4(rayDirection, 0.0)).xyz);
+    
+    // // === Convert to NDC and compute sensor plane position
+    // float2 ndc = uv * 2.0 - 1.0;
+    // ndc.y *= -1.0;
+
+    // float sensorX = ndc.x * tan(params.fovX * 0.5);
+    // float sensorY = ndc.y * tan(params.fovY * 0.5);
+    // float3 sensorPosCam = float3(sensorX, sensorY, -1.0);
+
+    float3 pSensorCam = cameraRayOrigin + 1 * camRayDirection;
+    sensorPosCam.z = -1.0;
     
     // === Sample lens point
     float rndR = halton(frameIndex, 2);
@@ -560,13 +575,15 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     float t = fmod(rndTheta + axisRad, M_PI_F);
     float phase = (t < M_PI_F / 2.0) ? (t / (M_PI_F / 2.0)) : ((M_PI_F - t) / (M_PI_F / 2.0));
     float eyePower = params.SPH + params.CYL * phase;
-    float adjustedFocalDist = params.focalDistance + 1.0 / eyePower;
+    // float adjustedFocalDist = params.focalDistance + 1.0 / eyePower;
+    float adjustedFocalDist = 1 / (1 / parameters.focalDistance + eyePower)
     
     // === Compute focal point in camera space and transform
     float3 focusPosCam = sensorPosCam * adjustedFocalDist;
     
-    float3 lensPosWorld = (params.viewMatrix * float4(lensPosCam, 1.0)).xyz;
-    float3 focusPosWorld = (params.viewMatrix * float4(focusPosCam, 1.0)).xyz;
+    // === Convert camera space to world space
+    float3 lensPosWorld = (params.inverseViewMatrix * float4(lensPosCam, 1.0)).xyz;
+    float3 focusPosWorld = (params.inverseViewMatrix * float4(focusPosCam, 1.0)).xyz;
     
     float3 rayOrigin = lensPosWorld;
     float3 rayDir = normalize(focusPosWorld - lensPosWorld);
