@@ -152,7 +152,6 @@ actor Renderer {
         
         worldTracking = WorldTrackingProvider()
         arSession = ARKitSession()
-
     }
     
     private func startARSession() async {
@@ -219,6 +218,30 @@ actor Renderer {
     .storageModeShared)
             self.triangleBuffer?.label = "Model Triangles Buffer"
         }
+        
+        // MARK: for testing, let's try to perform transforms here
+//        let rotation = SIMD3<Float>(0,45,0)
+//        var m = matrix_identity_float4x4
+//        rotateMatrix(matrix: &m, rotation: rotation)
+//        // loop over self.triangleBuffer and apply rotation to points of every triangle
+//        let triangleBufferPointer = self.triangleBuffer?.contents().bindMemory(to: GPUTriangle.self, capacity: self.triangleCount)
+//        let triangleBufferPointerCount = self.triangleCount
+//        for i in 0..<triangleBufferPointerCount {
+//            let triangle = triangleBufferPointer![i]
+//            let p1 = triangle.p1
+//            let p2 = triangle.p2
+//            let p3 = triangle.p3
+//            
+//            // Apply rotation to each point
+//            let rotatedP1 = applyTransform(p1, modelMatrix: m)
+//            let rotatedP2 = applyTransform(p2, modelMatrix: m)
+//            let rotatedP3 = applyTransform(p3, modelMatrix: m)
+//            
+//            // Update the triangle points
+//            triangleBufferPointer![i].p1 = SIMD3<Float>(rotatedP1.x, rotatedP1.y, rotatedP1.z)
+//            triangleBufferPointer![i].p2 = SIMD3<Float>(rotatedP2.x, rotatedP2.y, rotatedP2.z)
+//            triangleBufferPointer![i].p3 = SIMD3<Float>(rotatedP3.x, rotatedP3.y, rotatedP3.z)
+//        }
     }
     // MARK: END
 
@@ -486,6 +509,8 @@ actor Renderer {
 
         // Create rotation matrices from AppModel rotation values
         // MARK: doing it here does not result in local rotations. adding a translation does not help.
+        let c = Globals.shared.modelCenter
+        let initialization = await matrix4x4_translation(-c.x, -c.y, -c.z)
         let rotationMatrixX = await matrix4x4_rotation(radians: radians_from_degrees(appModel.rotationX), axis: SIMD3<Float>(1, 0, 0))
         let rotationMatrixY = await matrix4x4_rotation(radians: radians_from_degrees(appModel.rotationY), axis: SIMD3<Float>(0, 1, 0))
         let rotationMatrixZ = await matrix4x4_rotation(radians: radians_from_degrees(appModel.rotationZ), axis: SIMD3<Float>(0, 0, 1))
@@ -493,12 +518,15 @@ actor Renderer {
         // Combine all rotation matrices
         let modelRotationMatrix = rotationMatrixX * rotationMatrixY * rotationMatrixZ
         
-        let c = Globals.shared.modelCenter
+//        let c = Globals.shared.modelCenter
+//        let modelTranslationMatrix = matrix4x4_translation(c.x, c.y, c.z)
         let modelTranslationMatrix = matrix4x4_translation(c.x, c.y, c.z)
         let modelScaleMatrix = matrix4x4_scale(-1, 1, 1)
         
         // Apply rotation to the model matrix
-        let modelMatrix = modelTranslationMatrix * modelRotationMatrix * modelScaleMatrix
+        let modelMatrix = modelTranslationMatrix * modelScaleMatrix * initialization
+        // let model matrix be
+//        let modelMatrix = modelTranslationMatrix
         
         let simdDeviceAnchor = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
         

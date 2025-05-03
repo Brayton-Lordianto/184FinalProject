@@ -82,15 +82,14 @@ func convertModelToShaderScene(model: Model) -> [Triangle] {
     if Globals.shared.name != AppModel.ModelType.customCornellBox.filename {
         model.position += Globals.shared.modelCenter
     }
-    
+    let rotationFromUser = -1 * SIMD3<Float>(Globals.shared.rotationX, Globals.shared.rotationY, Globals.shared.rotationZ)
     
     var triangles = [Triangle]()
     var modelMatrix = matrix_identity_float4x4
-    translateMatrix(matrix: &modelMatrix, position: model.position)
+    rotateMatrix(matrix: &modelMatrix, rotation: toRadians(from: rotationFromUser))
     rotateMatrix(matrix: &modelMatrix, rotation: toRadians(from: model.rotation))
     scaleMatrix(matrix: &modelMatrix, scale: model.scale)
-    
-    
+    translateMatrix(matrix: &modelMatrix, position: model.position)
     
     
     for (meshIndex, mesh) in model.meshes.enumerated() {

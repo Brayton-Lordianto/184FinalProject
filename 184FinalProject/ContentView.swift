@@ -16,14 +16,28 @@ class Globals {
     var name: String = AppModel.ModelType.customCornellBox.rawValue
     // we center the models differently for rotation around that axis
     let modelCenter: SIMD3<Float> = SIMD3<Float>(0, -0.5, 0)
+    // store rotations globally
+    var rotationX: Float = 0.0
+    var rotationY: Float = 0.0
+    var rotationZ: Float = 0.0
 }
 
 
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel
+    let rotationRange: ClosedRange<Float> = -90...90.0
     
     var body: some View {
         VStack {
+            if appModel.immersiveSpaceState == .closed {
+                Model3D(named: "rubiks_cube")
+                .padding()
+                // rotate by rotations in app model
+                .rotation3DEffect(.init(degrees: Double(appModel.rotationX)), axis: (1, 0, 0))
+                .rotation3DEffect(.init(degrees: Double(appModel.rotationY)), axis: (0, 1, 0))
+                .rotation3DEffect(.init(degrees: Double(appModel.rotationZ)), axis: (0, 0, 1))
+            }
+            
             Text("Select Model for Path Tracing")
                 .font(.headline)
                 .padding(.bottom, 8)
@@ -41,7 +55,7 @@ struct ContentView: View {
             .padding(.bottom, 20)
             
             // MARK: rotations of the model
-            if appModel.immersiveSpaceState == .open {
+            if appModel.immersiveSpaceState == .closed {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Model Rotation Controls")
                         .font(.headline)
@@ -49,14 +63,14 @@ struct ContentView: View {
                     // X Rotation Slider
                     HStack {
                         Text("X Rotation:")
-                        Slider(value: $bindableAppModel.rotationX, in: 0...360, step: 1)
+                        Slider(value: $bindableAppModel.rotationX, in: rotationRange, step: 1)
                         Text("\(Int(bindableAppModel.rotationX))°")
                             .frame(width: 40, alignment: .trailing)
                     }
                     // Y Rotation Slider
                     HStack {
                         Text("Y Rotation:")
-                        Slider(value: $bindableAppModel.rotationY, in: 0...360, step: 1)
+                        Slider(value: $bindableAppModel.rotationY, in: rotationRange, step: 1)
                         Text("\(Int(bindableAppModel.rotationY))°")
                             .frame(width: 40, alignment: .trailing)
                     }
@@ -64,7 +78,7 @@ struct ContentView: View {
                     HStack {
                         Text("Z Rotation:")
                         Slider(value: $bindableAppModel.rotationZ
-                               , in: 0...360, step: 1)
+                               , in: rotationRange, step: 1)
                         Text("\(Int(bindableAppModel.rotationZ))°")
                             .frame(width: 40, alignment: .trailing)
                     }
@@ -86,6 +100,11 @@ struct ContentView: View {
             
             .onChange(of: bindableAppModel.selectedModel) { _, newValue in
                 Globals.shared.name = newValue.filename
+            }
+            .onChange(of: bindableAppModel.immersiveSpaceState) { _, _ in
+                Globals.shared.rotationX = bindableAppModel.rotationX
+                Globals.shared.rotationY = bindableAppModel.rotationY
+                Globals.shared.rotationZ = bindableAppModel.rotationZ
             }
         }
         .padding()
