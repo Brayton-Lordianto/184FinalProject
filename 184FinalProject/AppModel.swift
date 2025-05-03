@@ -49,4 +49,28 @@ class AppModel {
     var rotationX: Float = 0.0
     var rotationY: Float = 0.0
     var rotationZ: Float = 0.0
+    
+    // shader options
+    var useViewMatrix: Bool = true
+    
+    // Resolution options
+    enum Resolution: Int, CaseIterable, Identifiable {
+        case low = 720
+        case medium = 1080
+        case high = 1440
+        case ultra = 2160
+        
+        var id: Int { self.rawValue }
+        
+        var displayName: String {
+            switch self {
+            case .low: return "Low (720p)"
+            case .medium: return "Medium (1080p)"
+            case .high: return "High (1440p)"
+            case .ultra: return "Ultra (2160p)"
+            }
+        }
+    }
+    
+    var selectedResolution: Resolution = .high
 }

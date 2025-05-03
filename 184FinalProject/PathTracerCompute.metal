@@ -523,12 +523,18 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     rayDirection.x = sin(phi) * cos(theta);
     rayDirection.y = cos(phi);
     rayDirection.z = sin(phi) * sin(theta);
-    rayDirection = (params.viewMatrix * float4(rayDirection, 0)).xyz; // Transform to world space
+    
+    // Use math to conditionally apply view matrix transformation
+    // When params.useViewMatrix is true, use transformed direction
+    // When params.useViewMatrix is false, use original direction
+    float3 transformedDir = (params.viewMatrix * float4(rayDirection, 0)).xyz;
+    rayDirection = mix(rayDirection, transformedDir, float(params.useViewMatrix));
     
     // Trace path with model triangles
     float3 color = pathTrace(rayPosition, rayDirection, scene, modelTriangles, modelTriangleCount, rngState, frameIndex);
     // Apply gamma correction for display
     color = pow(color, float3(1.0/2.2));
-    output.write(float4(color, 1.0), gid);
+    if (length(color - float3(0)) > 0.01)
+        output.write(float4(color, 1.0), gid);
 }
 

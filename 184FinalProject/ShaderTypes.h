@@ -78,6 +78,7 @@ typedef struct {
     matrix_float4x4 viewMatrix;
     float fovY;
     uint32_t modelTriangleCount; // Number of active model triangles
+    bool useViewMatrix;          // Whether to use view matrix in shader
 } ComputeParams;
 
 typedef struct {

@@ -90,6 +90,24 @@ struct ContentView: View {
                     }
                     .buttonStyle(.bordered)
                     .padding(.top, 8)
+                    
+                    // View Matrix Toggle
+                    Toggle("Use View Matrix", isOn: $bindableAppModel.useViewMatrix)
+                        .padding(.top, 12)
+                    
+                    // Resolution Picker
+                    Text("Shader Resolution")
+                        .font(.headline)
+                        .padding(.top, 16)
+                    
+                    Picker("Resolution", selection: $bindableAppModel.selectedResolution) {
+                        ForEach(AppModel.Resolution.allCases) { resolution in
+                            Text(resolution.displayName).tag(resolution)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(appModel.immersiveSpaceState == .open ||
+                              appModel.immersiveSpaceState == .inTransition)
                 }
             }
 
@@ -97,6 +115,7 @@ struct ContentView: View {
             
             
             ToggleImmersiveSpaceButton()
+                .padding()
             
             .onChange(of: bindableAppModel.selectedModel) { _, newValue in
                 Globals.shared.name = newValue.filename

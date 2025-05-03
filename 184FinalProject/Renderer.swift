@@ -10,6 +10,7 @@ import Metal
 import MetalKit
 import simd
 import Spatial
+import UniformTypeIdentifiers
 
 struct Vertex {
     var position: simd_float3
@@ -593,7 +594,7 @@ actor Renderer {
         }
         
         // Run compute pass before render pass
-        dispatchComputeCommands(commandBuffer: commandBuffer, drawable: drawable, deviceAnchor: deviceAnchor)
+        await dispatchComputeCommands(commandBuffer: commandBuffer, drawable: drawable, deviceAnchor: deviceAnchor)
         
         /// Final pass rendering code here
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -640,7 +641,7 @@ actor Renderer {
         }
         
         // MARK: Compute Pass
-        func dispatchComputeCommands(commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) {
+        func dispatchComputeCommands(commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) async {
             guard let pathTracerPipeline = computePipelines["pathTracerCompute"],
                   let accumulationPipeline = computePipelines["accumulationKernel"],
                   let denoisePipeline = computePipelines["fastDenoiseKernel"],
@@ -691,7 +692,8 @@ actor Renderer {
                 cameraPosition: cameraPosition,
                 viewMatrix: viewMatrix,
                 fovY: fovY,
-                modelTriangleCount: UInt32(triangleCount) // Pass the actual triangle count
+                modelTriangleCount: UInt32(triangleCount), // Pass the actual triangle count
+                useViewMatrix: await self.appModel.useViewMatrix // Pass the useViewMatrix flag
             )
             
             // Calculate threads and threadgroups
@@ -742,7 +744,7 @@ actor Renderer {
             denoiseEncoder.setTexture(outputTexture, index: 1)  // Output is the final displayed texture
             denoiseEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
             denoiseEncoder.endEncoding()
-            
+                        
             // Copy accumulated result for next frame
             guard let copyEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
             copyEncoder.copy(from: denoiseTexture, to: accumTexture)
@@ -760,15 +762,15 @@ actor Renderer {
     }
     
     // Method to set up and initialize compute components
-    private func setupComputeComponents() {
+    private func setupComputeComponents() async {
         setupComputePipelines()
-        let resolution = 1440
+        let resolution = await self.appModel.selectedResolution.rawValue
         createComputeOutputTexture(width: resolution, height: resolution)
     }
     
     func renderLoop() async {
         // Set up compute components at the start of the render loop
-        setupComputeComponents()
+        await setupComputeComponents()
         
         while true {
             if layerRenderer.state == .invalidated {
