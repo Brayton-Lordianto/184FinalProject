@@ -75,7 +75,9 @@ func additionalVertexPositionProcessing(_ position: SIMD3<Float>) -> SIMD3<Float
 
 func convertModelToShaderScene(model: Model) -> [Triangle] {
     // MARK: CORRECTION FROM PARSING ISSUE
-    model.rotation = SIMD3<Float>(0, 0, 0)
+    if Globals.shared.name == AppModel.ModelType.originalCornellBox.filename {
+        model.rotation = SIMD3<Float>(-90, 0, 0)
+    }
     model.position -= SIMD3<Float>(0, 0.5, 0)
     
     

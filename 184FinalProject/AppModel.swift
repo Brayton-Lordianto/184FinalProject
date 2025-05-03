@@ -28,12 +28,12 @@ class AppModel {
         
         var filename: String {
             switch self {
+            case .originalCornellBox:
+                return "CornellTest"
             case .customCornellBox:
                 return ""  // Uses fakeTriangles
             case .bunny:
                 return "bunny"
-            case .originalCornellBox:
-                return "Cornell_Box_2"
             }
         }
         
@@ -42,5 +42,5 @@ class AppModel {
         }
     }
     
-    var selectedModel: ModelType = .bunny
+    var selectedModel: ModelType = .originalCornellBox
 }
