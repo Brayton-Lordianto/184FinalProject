@@ -92,7 +92,6 @@ actor Renderer {
     
     var lastCameraPosition: SIMD3<Float>?
     
-    let obj: Model?
     /*
      type Sphere
      let spheres: [Sphere]
@@ -100,67 +99,10 @@ actor Renderer {
     
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
         self.device = layerRenderer.device
-
-        // MARK: load up your meshes
-        /* E.G. this was referenced from existing project with parser.
-         let textureLoader = MTKTextureLoader(device: self.device)
-         let sponzaURL = Bundle.main.url(forResource: "Sponza_Scene", withExtension: "usdz")!
-         self.sponzaModel = Model()
-         self.sponzaModel?.scale = simd_float3(repeating: 0.004)
-         self.sponzaModel?.loadModel(device: device, url: sponzaURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
-         */
-        let vertexDescriptor = MTLVertexDescriptor()
-        vertexDescriptor.layouts[30].stride = MemoryLayout<Vertex>.stride
-        vertexDescriptor.layouts[30].stepRate = 1
-        vertexDescriptor.layouts[30].stepFunction = MTLVertexStepFunction.perVertex
-
-        vertexDescriptor.attributes[0].format = MTLVertexFormat.float3
-        vertexDescriptor.attributes[0].offset = MemoryLayout.offset(of: \Vertex.position)!
-        vertexDescriptor.attributes[0].bufferIndex = 30
-
-        vertexDescriptor.attributes[1].format = MTLVertexFormat.float2
-        vertexDescriptor.attributes[1].offset = MemoryLayout.offset(of: \Vertex.texCoord)!
-        vertexDescriptor.attributes[1].bufferIndex = 30
-        
-        vertexDescriptor.attributes[2].format = MTLVertexFormat.float3
-        vertexDescriptor.attributes[2].offset = MemoryLayout.offset(of: \Vertex.normal)!
-        vertexDescriptor.attributes[2].bufferIndex = 30
-        let textureLoader = MTKTextureLoader(device: layerRenderer.device)
-//        let cornellURL = Bundle.main.url(forResource: "Cornell_Box_2", withExtension: "usdz")!
-//         let url = cornellURL
-        var name = "CornellTest"
-        name = "bunny"
-        let url = Bundle.main.url(forResource: name, withExtension: "usdz")!
-
-        self.obj = Model()
-        self.obj!.loadModel(device: device, url: url, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
-        
-        // Convert model to shader-compatible triangles
-        var triangles = convertModelToShaderScene(model: self.obj!)
-//        triangles = scaleModelToScene(triangles)
-        
-        // Create GPU triangles for passing to shader
-        var gpuTriangles = triangles.map { GPUTriangle(from: $0) }
-        self.triangleCount = gpuTriangles.count
-        
-        // MARK: use fake triangels
-//        gpuTriangles = fakeTriangles.map { GPUTriangle(from: $0) }
-//        self.triangleCount = gpuTriangles.count
-
-        if !gpuTriangles.isEmpty {
-            let triangleBufferSize = (MemoryLayout<GPUTriangle>.stride) * gpuTriangles.count
-            let alignedTriangleBufferSize = (triangleBufferSize + 0xFF) & -0x100
-            self.triangleBuffer = device.makeBuffer(bytes: &gpuTriangles,
-                                                   length: alignedTriangleBufferSize,
-                                                   options: .storageModeShared)
-            self.triangleBuffer?.label = "Model Triangles Buffer"
-        }
-        // MARK: END
-        
-        
         self.layerRenderer = layerRenderer
         self.commandQueue = self.device.makeCommandQueue()!
         self.appModel = appModel
+
         
         let device = self.device
         if device.supports32BitMSAA && device.supportsTextureSampleCount(4) {
@@ -210,6 +152,74 @@ actor Renderer {
         
         worldTracking = WorldTrackingProvider()
         arSession = ARKitSession()
+        
+        
+        
+        
+        // MARK: Set up vertex descriptor for models
+        let vertexDescriptor = MTLVertexDescriptor()
+        vertexDescriptor.layouts[30].stride = MemoryLayout<Vertex>.stride
+        vertexDescriptor.layouts[30].stepRate = 1
+        vertexDescriptor.layouts[30].stepFunction = MTLVertexStepFunction.perVertex
+
+        vertexDescriptor.attributes[0].format = MTLVertexFormat.float3
+        vertexDescriptor.attributes[0].offset = MemoryLayout.offset(of: \Vertex.position)!
+        vertexDescriptor.attributes[0].bufferIndex = 30
+
+        vertexDescriptor.attributes[1].format = MTLVertexFormat.float2
+        vertexDescriptor.attributes[1].offset = MemoryLayout.offset(of: \Vertex.texCoord)!
+        vertexDescriptor.attributes[1].bufferIndex = 30
+        
+        vertexDescriptor.attributes[2].format = MTLVertexFormat.float3
+        vertexDescriptor.attributes[2].offset = MemoryLayout.offset(of: \Vertex.normal)!
+        vertexDescriptor.attributes[2].bufferIndex = 30
+        
+        // Load the appropriate model based on appModel.selectedModel
+        let textureLoader = MTKTextureLoader(device: layerRenderer.device)
+        
+        // Create triangles based on the selected model type
+        Task { @MainActor in
+            var gpuTriangles: [GPUTriangle]
+            let obj: Model?
+            
+            if self.appModel.selectedModel.useFakeTriangles {
+                // Use fake triangles (custom Cornell box)
+                gpuTriangles = fakeTriangles.map { GPUTriangle(from: $0) }
+                DispatchQueue.global().async {
+                    self.triangleCount = gpuTriangles.count
+                }
+            } else {
+                // Load a USDZ model
+                let modelFilename = self.appModel.selectedModel.filename
+                guard let url = Bundle.main.url(forResource: modelFilename, withExtension: "usdz") else {
+                    fatalError("Failed to load model file: \(modelFilename).usdz")
+                }
+                
+                obj = Model()
+                obj!.loadModel(device: device, url: url, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
+                
+                // Convert model to shader-compatible triangles
+                let triangles = convertModelToShaderScene(model: obj!)
+                
+                // Create GPU triangles for passing to shader
+                gpuTriangles = triangles.map { GPUTriangle(from: $0) }
+                DispatchQueue.global().async {
+                    self.triangleCount = gpuTriangles.count
+                }
+            }
+            
+            if !gpuTriangles.isEmpty {
+                let triangleBufferSize = (MemoryLayout<GPUTriangle>.stride) * gpuTriangles.count
+                let alignedTriangleBufferSize = (triangleBufferSize + 0xFF) & -0x100
+                DispatchQueue.global().async {
+                    self.triangleBuffer = device.makeBuffer(bytes: &gpuTriangles,
+                                                            length: alignedTriangleBufferSize,
+                                                            options: .storageModeShared)
+                    self.triangleBuffer?.label = "Model Triangles Buffer"
+                }
+            }
+        }
+        // MARK: END
     }
     
     private func startARSession() async {
