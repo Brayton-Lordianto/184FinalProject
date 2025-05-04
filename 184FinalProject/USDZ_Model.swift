@@ -1,4 +1,4 @@
-// MARK: adapted from https://github.com/SamoZ256/MetalTutorial/blob/main/MetalTutorial7/MetalTutorial/Model.swift
+// MARK: adapted from and edited https://github.com/SamoZ256/MetalTutorial/blob/main/MetalTutorial7/MetalTutorial/Model.swift
 import MetalKit
 
 func getMaterial(_ mdlSubmesh: MDLSubmesh) -> Material {

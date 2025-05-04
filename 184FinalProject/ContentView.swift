@@ -136,7 +136,7 @@ struct ContentView: View {
                 }
                 HStack {
                     Text("SPH")
-                    Slider(value: $bindableAppModel.SPH, in: 0.0...4.0, step: 0.1) {
+                    Slider(value: $bindableAppModel.SPH, in: 0.1...4.0, step: 0.1) {
                         Text("SPH")
                     }
                     Text("\(String(format: "%.2f", bindableAppModel.SPH))")
@@ -144,7 +144,7 @@ struct ContentView: View {
                 }
                 HStack {
                     Text("CYL")
-                    Slider(value: $bindableAppModel.CYL, in: 0.0...4.0, step: 0.1) {
+                    Slider(value: $bindableAppModel.CYL, in: -3.0...4.0, step: 0.1) {
                         Text("CYL")
                     }
                     Text("\(String(format: "%.2f", bindableAppModel.CYL))")

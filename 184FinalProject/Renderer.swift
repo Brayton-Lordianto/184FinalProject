@@ -219,30 +219,6 @@ actor Renderer {
     .storageModeShared)
             self.triangleBuffer?.label = "Model Triangles Buffer"
         }
-        
-        // MARK: for testing, let's try to perform transforms here
-//        let rotation = SIMD3<Float>(0,45,0)
-//        var m = matrix_identity_float4x4
-//        rotateMatrix(matrix: &m, rotation: rotation)
-//        // loop over self.triangleBuffer and apply rotation to points of every triangle
-//        let triangleBufferPointer = self.triangleBuffer?.contents().bindMemory(to: GPUTriangle.self, capacity: self.triangleCount)
-//        let triangleBufferPointerCount = self.triangleCount
-//        for i in 0..<triangleBufferPointerCount {
-//            let triangle = triangleBufferPointer![i]
-//            let p1 = triangle.p1
-//            let p2 = triangle.p2
-//            let p3 = triangle.p3
-//            
-//            // Apply rotation to each point
-//            let rotatedP1 = applyTransform(p1, modelMatrix: m)
-//            let rotatedP2 = applyTransform(p2, modelMatrix: m)
-//            let rotatedP3 = applyTransform(p3, modelMatrix: m)
-//            
-//            // Update the triangle points
-//            triangleBufferPointer![i].p1 = SIMD3<Float>(rotatedP1.x, rotatedP1.y, rotatedP1.z)
-//            triangleBufferPointer![i].p2 = SIMD3<Float>(rotatedP2.x, rotatedP2.y, rotatedP2.z)
-//            triangleBufferPointer![i].p3 = SIMD3<Float>(rotatedP3.x, rotatedP3.y, rotatedP3.z)
-//        }
     }
     // MARK: END
 
@@ -682,7 +658,7 @@ actor Renderer {
             camMovement = length(currentCameraPosition - (lastCameraPosition ?? SIMD3<Float>(0, 0, 0)))
             lastCameraPosition = currentCameraPosition
             let cameraPosition = viewMatrix.columns.3.xyz
-            let projection = drawable.computeProjection(viewIndex: 0)
+//            let projection = drawable.computeProjection(viewIndex: 0)
             var params = ComputeParams(
                 time: computeTime,
                 resolution: SIMD2<Float>(Float(outputTexture.width), Float(outputTexture.height)),
@@ -719,8 +695,6 @@ actor Renderer {
             guard let pathTracerEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
             pathTracerEncoder.setComputePipelineState(pathTracerPipeline)
             pathTracerEncoder.setBytes(&params, length: MemoryLayout<ComputeParams>.size, index: 0)
-            
-            // Set the triangle buffer if available
             if let triangleBuffer = triangleBuffer {
                 pathTracerEncoder.setBuffer(triangleBuffer, offset: 0, index: 1)
             }
@@ -741,14 +715,11 @@ actor Renderer {
             
             // PASS 3: Denoising Pass - apply real-time denoising to the accumulated result
             guard let denoiseEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
-            
-            // Select which denoiser to use based on the flag
             if useEnhancedDenoiser, let enhancedPipeline = computePipelines["enhancedDenoiseKernel"] {
                 denoiseEncoder.setComputePipelineState(enhancedPipeline)
             } else {
                 denoiseEncoder.setComputePipelineState(denoisePipeline)
             }
-            
             denoiseEncoder.setBytes(&sampleCount, length: MemoryLayout<UInt32>.size, index: 0)
             denoiseEncoder.setTexture(denoiseTexture, index: 0) // Input is the accumulated result
             denoiseEncoder.setTexture(outputTexture, index: 1)  // Output is the final displayed texture
@@ -762,6 +733,7 @@ actor Renderer {
             
 //            print("Rendering sample \(sampleCount) with \(triangleCount) model triangles")
         }
+        // MARK: END
         
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
