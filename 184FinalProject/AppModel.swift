@@ -18,4 +18,14 @@ class AppModel {
         case open
     }
     var immersiveSpaceState = ImmersiveSpaceState.closed
+    
+    var lensRadius: Float = 0.1
+    var focalDistance: Float = 4
+    var SPH: Float = 0
+    var CYL: Float = 0
+    var AXIS: Float =  45
+    var dofJustChanged: Bool = false
+    func changeDOF() {
+        dofJustChanged.toggle()
+    }
 }

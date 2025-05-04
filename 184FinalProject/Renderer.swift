@@ -453,7 +453,7 @@ actor Renderer {
         rotation += 0.01
     }
     
-    func renderFrame() {
+    func renderFrame() async {
         /// Per frame updates hare
         
         guard let frame = layerRenderer.queryNextFrame() else { return }
@@ -502,7 +502,7 @@ actor Renderer {
         }
         
         // Run compute pass before render pass
-        dispatchComputeCommands(commandBuffer: commandBuffer, drawable: drawable, deviceAnchor: deviceAnchor)
+        await dispatchComputeCommands(commandBuffer: commandBuffer, drawable: drawable, deviceAnchor: deviceAnchor)
         
         /// Final pass rendering code here
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -549,7 +549,7 @@ actor Renderer {
         }
         
         // MARK: Compute Pass
-        func dispatchComputeCommands(commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) {
+        func dispatchComputeCommands(commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) async {
             guard let pathTracerPipeline = computePipelines["pathTracerCompute"],
                   let accumulationPipeline = computePipelines["accumulationKernel"],
                   let outputTexture = computeOutputTexture,
@@ -599,16 +599,28 @@ actor Renderer {
                 sampleCount: sampleCount,
                 cameraPosition: cameraPosition,
                 viewMatrix: viewMatrix,
+                inverseViewMatrix: viewMatrix.inverse,
+                projectionMatrix: projection,
                 fovY: fovY,
                 fovX: fovX,
                 modelTriangleCount: UInt32(mesh.submeshes.count),
-                
-                lensRadius: 0.0,
-                focalDistance: 4.0,
-                SPH: 0.0,            // for myopia
-                CYL: 1.5,             // astigmatism strength
-                AXIS: 45.0            // astigmatism angle
+                lensRadius: await appModel.lensRadius,
+                focalDistance: await appModel.focalDistance,
+                SPH: await appModel.SPH,            // for myopia
+                CYL: await appModel.CYL,             // astigmatism strength
+                AXIS: await appModel.AXIS            // astigmatism angle
+//                lensRadius: 0.05,
+//                focalDistance: 4.0,
+//                SPH: 0.0,            // for myopia
+//                CYL: 0.0,             // astigmatism strength
+//                AXIS: 45.0            // astigmatism angle
             )
+//            print("hello")
+            // if app model just changed, reset acumulation
+            if await appModel.dofJustChanged {
+                resetAccumulation()
+                await appModel.changeDOF()
+            }
             
             // Calculate threads and threadgroups
             // pretty standard setup for compute shaders
@@ -642,7 +654,7 @@ actor Renderer {
             copyEncoder.copy(from: outputTexture, to: accumTexture)
             copyEncoder.endEncoding()
             
-            print("Rendering sample \(sampleCount)")
+//            print("Rendering sample \(sampleCount)")
         }
         
         renderEncoder.popDebugGroup()
@@ -660,7 +672,7 @@ actor Renderer {
         createComputeOutputTexture(width: resolution, height: resolution)
     }
     
-    func renderLoop() {
+    func renderLoop() async {
         // Set up compute components at the start of the render loop
         setupComputeComponents()
         
@@ -683,9 +695,9 @@ actor Renderer {
                         appModel.immersiveSpaceState = .open
                     }
                 }
-                autoreleasepool {
-                    self.renderFrame()
-                }
+//                autoreleasepool {
+                    await self.renderFrame()
+//                }
             }
         }
     }

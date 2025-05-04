@@ -55,6 +55,8 @@ typedef struct {
     uint32_t sampleCount;
     simd_float3 cameraPosition;
     matrix_float4x4 viewMatrix;
+    matrix_float4x4 inverseViewMatrix;
+    matrix_float4x4 projectionMatrix;
     float fovY;
     float fovX;
     uint32_t modelTriangleCount;
