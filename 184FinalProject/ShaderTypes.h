@@ -76,9 +76,15 @@ typedef struct {
     uint32_t sampleCount;
     simd_float3 cameraPosition;
     matrix_float4x4 viewMatrix;
-    float fovY;
+    matrix_float4x4 inverseViewMatrix;
     uint32_t modelTriangleCount; // Number of active model triangles
     bool useViewMatrix;          // Whether to use view matrix in shader
+    //for aberration simulation
+    float lensRadius;
+    float focalDistance;
+    float SPH;
+    float CYL;
+    float AXIS;
 } ComputeParams;
 
 typedef struct {

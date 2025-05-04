@@ -683,7 +683,6 @@ actor Renderer {
             lastCameraPosition = currentCameraPosition
             let cameraPosition = viewMatrix.columns.3.xyz
             let projection = drawable.computeProjection(viewIndex: 0)
-            let fovY = 2.0 * atan(1.0 / projection.columns.1.y)
             var params = ComputeParams(
                 time: computeTime,
                 resolution: SIMD2<Float>(Float(outputTexture.width), Float(outputTexture.height)),
@@ -691,10 +690,21 @@ actor Renderer {
                 sampleCount: sampleCount,
                 cameraPosition: cameraPosition,
                 viewMatrix: viewMatrix,
-                fovY: fovY,
+                inverseViewMatrix: viewMatrix.inverse,
                 modelTriangleCount: UInt32(triangleCount), // Pass the actual triangle count
-                useViewMatrix: await self.appModel.useViewMatrix // Pass the useViewMatrix flag
+                useViewMatrix: await self.appModel.useViewMatrix,
+                lensRadius: await appModel.lensRadius,
+                focalDistance: await appModel.focalDistance,
+                SPH: await appModel.SPH,            // for myopia
+                CYL: await appModel.CYL,             // astigmatism strength
+                AXIS: await appModel.AXIS            // astigmatism angle
             )
+            
+            // if app model just changed, reset acumulation
+            if await appModel.dofJustChanged {
+                resetAccumulation()
+                await appModel.changeDOF()
+            }
             
             // Calculate threads and threadgroups
             // pretty standard setup for compute shaders

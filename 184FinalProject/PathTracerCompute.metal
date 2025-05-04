@@ -489,11 +489,10 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     // now we'll rely on model triangles passed from Swift
     Scene scene = {
         .lights = {
-//            { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 }
-//            ,{ float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
             { float3(-1, 1.9, -2), float3(-1, 1.9, -4.5), float3(1, 1.9, -4.5), half3(1, 1, 1), true, 100.0 }
         }
     };
+    
     // for each triangle, if it is a light, add to scene lights
     uint j = 0;
     for (uint i = 0; i < modelTriangleCount; i++) {
@@ -516,13 +515,48 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     
     // initialize ray direction
     
-    float3 rayPosition = params.cameraPosition;
+//    float3 rayPosition = params.cameraPosition;
+    float3 rayPosition = float3(0);
     float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
     float phi = (uv.y) * M_PI_F;   // latitude: 0 to π 540
     float3 rayDirection;
     rayDirection.x = sin(phi) * cos(theta);
     rayDirection.y = cos(phi);
     rayDirection.z = sin(phi) * sin(theta);
+    
+    // MARK: SIMULATE ABERRATIONS HERE
+    //     Convert to camera space
+        float3 camRayOrigin = (float4(rayPosition, 1.0)).xyz;
+        float3 camRayDirection = normalize((float4(rayDirection, 0.0)).xyz);
+        
+        float3 pSensorCam = camRayOrigin + 1 * camRayDirection;
+        
+        // === Sample lens point
+        float rndR = halton(frameIndex, 2);
+        float rndTheta = halton(frameIndex, 3) * 2.0f * M_PI_F;
+        
+        float lensX = params.lensRadius * sqrt(rndR) * cos(rndTheta);
+        float lensY = params.lensRadius * sqrt(rndR) * sin(rndTheta);
+        float3 lensPosCam = float3(lensX, lensY, 0.0);
+        
+        // === Astigmatism: modulate focus per meridian
+        float axisRad = params.AXIS * M_PI_F / 180.0;
+        float t = fmod(rndTheta + axisRad, M_PI_F);
+        float phase = (t < M_PI_F / 2.0) ? (t / (M_PI_F / 2.0)) : ((M_PI_F - t) / (M_PI_F / 2.0));
+        float eyePower = params.SPH + params.CYL * phase;
+        // float adjustedFocalDist = params.focalDistance + 1.0 / eyePower;
+        float adjustedFocalDist = 1 / (1 / params.focalDistance + eyePower);
+        
+        // === Compute focal point in camera space and transform
+        float3 focusPosCam = pSensorCam * adjustedFocalDist;
+        
+        // === Convert camera space to world space
+        float3 lensPosWorld = (float4(lensPosCam, 1.0)).xyz;
+        float3 focusPosWorld = (float4(focusPosCam, 1.0)).xyz;
+        
+        rayPosition = lensPosWorld;
+        rayDirection = normalize(focusPosWorld - lensPosWorld);
+    // MARK: END ======
     
     // Use math to conditionally apply view matrix transformation
     // When params.useViewMatrix is true, use transformed direction
