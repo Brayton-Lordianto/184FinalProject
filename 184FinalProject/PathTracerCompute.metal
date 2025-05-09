@@ -65,6 +65,14 @@ typedef struct {
 // MARK: RNG functions
 // Halton sequence primes for better sampling
 constant unsigned int primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
+// RNG functions
+float rand(thread uint2& seed) {
+    seed = 1103515245 * ((seed.x >> 1) ^ seed.y);
+    seed.x += seed.y;
+    seed.y += seed.x;
+    return float(seed.x & 0x00FFFFFF) / float(0x01000000);
+}
+    
 uint wang_hash(uint seed) {
     seed = uint(seed ^ uint(61)) ^ uint(seed >> uint(16));
     seed *= uint(9);
@@ -487,16 +495,21 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
     // Add jitter for anti-aliasing - use halton sequence for better distribution
     float2 jitter = float2(
-        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
-        halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
-    ) / float2(width, height);
-    uv += jitter;
-    
+                           halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
+                           halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
+                           ) / float2(width, height);
     // === initialize ray direction
 //    float3 rayPosition = params.cameraPosition;
     float3 rayPosition = float3(0); // since we don't really move that much anyway. this makes it more stable.
+    float2 uv = (float2(gid) + float2(0.5) + jitter) / float2(width, height);
+    if (uv.x <= 0.01 || uv.y <= 0.01) {
+        output.write(float4(1,0,0,1), gid);
+        return;
+    }
+
+//     float3 rayPosition = params.cameraPosition;
     float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
-    float phi = (uv.y) * M_PI_F;   // latitude: 0 to π 540
+    float phi = (uv.y) * M_PI_F;   // latitude: 0 to π
     float3 rayDirection;
     rayDirection.x = sin(phi) * cos(theta);
     rayDirection.y = cos(phi);
@@ -553,4 +566,3 @@ kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0
     if (length(color - float3(0)) > 0.01)
         output.write(float4(color, 1.0), gid);
 }
-

@@ -18,7 +18,6 @@ class AppModel {
         case open
     }
     var immersiveSpaceState = ImmersiveSpaceState.closed
-    
     enum ModelType: String, CaseIterable, Identifiable {
         case customCornellBox = "Custom Cornell Box"
         case bunny = "Bunny"

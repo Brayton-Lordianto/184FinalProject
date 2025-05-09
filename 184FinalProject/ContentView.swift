@@ -9,6 +9,7 @@ import SwiftUI
 import RealityKit
 import RealityKitContent
 
+
 // make static singleton global variable for name
 class Globals {
     private init() {}
@@ -21,7 +22,6 @@ class Globals {
     var rotationY: Float = 0.0
     var rotationZ: Float = 0.0
 }
-
 
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel

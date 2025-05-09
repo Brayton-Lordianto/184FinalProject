@@ -658,7 +658,6 @@ actor Renderer {
             camMovement = length(currentCameraPosition - (lastCameraPosition ?? SIMD3<Float>(0, 0, 0)))
             lastCameraPosition = currentCameraPosition
             let cameraPosition = viewMatrix.columns.3.xyz
-//            let projection = drawable.computeProjection(viewIndex: 0)
             var params = ComputeParams(
                 time: computeTime,
                 resolution: SIMD2<Float>(Float(outputTexture.width), Float(outputTexture.height)),
@@ -674,7 +673,12 @@ actor Renderer {
                 SPH: await appModel.SPH,            // for myopia
                 CYL: await appModel.CYL,             // astigmatism strength
                 AXIS: await appModel.AXIS            // astigmatism angle
-            )
+
+            // if app model just changed, reset acumulation
+            if await appModel.dofJustChanged {
+                resetAccumulation()
+                await appModel.changeDOF()
+            }
             
             // if app model just changed, reset acumulation
             if await appModel.dofJustChanged {
@@ -731,7 +735,6 @@ actor Renderer {
             copyEncoder.copy(from: denoiseTexture, to: accumTexture)
             copyEncoder.endEncoding()
             
-//            print("Rendering sample \(sampleCount) with \(triangleCount) model triangles")
         }
         // MARK: END
         

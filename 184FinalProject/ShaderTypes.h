@@ -95,5 +95,6 @@ typedef struct {
 } DenoiseParams;
 
 
+
 #endif /* ShaderTypes_h */
 
