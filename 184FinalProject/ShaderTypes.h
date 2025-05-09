@@ -48,6 +48,27 @@ typedef struct
     Uniforms uniforms[2];
 } UniformsArray;
 
+#ifdef __METAL_VERSION__
+// Material types matching those in Swift
+typedef enum {
+    DIFFUSE = 0,
+    METAL = 1,
+    DIELECTRIC = 2
+} MaterialType;
+
+// Triangle structure matching Swift side
+typedef struct {
+    float3 p1;           // 16 bytes
+    float3 p2;           // 16 bytes
+    float3 p3;           // 16 bytes
+    half3 color;         // 8 bytes
+    bool isLightSource;  // 1 byte + 3 bytes padding
+    float intensity;     // 4 bytes
+    int materialType;    // 4 bytes
+    float roughness;     // 4 bytes
+} GPUTriangle;
+#endif
+
 typedef struct {
     float time;
     simd_float2 resolution;
@@ -56,11 +77,8 @@ typedef struct {
     simd_float3 cameraPosition;
     matrix_float4x4 viewMatrix;
     matrix_float4x4 inverseViewMatrix;
-    matrix_float4x4 projectionMatrix;
-    float fovY;
-    float fovX;
-    uint32_t modelTriangleCount;
-
+    uint32_t modelTriangleCount; // Number of active model triangles
+    bool useViewMatrix;          // Whether to use view matrix in shader
     //for aberration simulation
     float lensRadius;
     float focalDistance;
@@ -68,6 +86,13 @@ typedef struct {
     float CYL;
     float AXIS;
 } ComputeParams;
+
+typedef struct {
+    float denoiseStrength;    // 0.0 to 1.0 (higher = more aggressive denoising)
+    float spatialVariance;    // Controls filter spatial spread
+    float colorThreshold;     // Threshold for color similarity
+    uint32_t sampleCount;     // Current sample count
+} DenoiseParams;
 
 
 

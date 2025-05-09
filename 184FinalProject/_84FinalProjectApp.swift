@@ -40,6 +40,7 @@ struct _84FinalProjectTestApp: App {
             }
         }
         .immersionStyle(selection: .constant(.full), in: .full)
+//        .immersionStyle(selection: .constant(.mixed), in: .mixed)
     }
 }
 

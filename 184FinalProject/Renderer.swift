@@ -10,6 +10,7 @@ import Metal
 import MetalKit
 import simd
 import Spatial
+import UniformTypeIdentifiers
 
 struct Vertex {
     var position: simd_float3
@@ -64,6 +65,10 @@ actor Renderer {
     var computeOutputTexture: MTLTexture?
     var computeTime: Float = 0.0
     
+    // MARK: Model triangle data for path tracing
+    var triangleBuffer: MTLBuffer?
+    var triangleCount: Int = 0
+    
     
     let inFlightSemaphore = DispatchSemaphore(value: maxBuffersInFlight)
     
@@ -88,7 +93,6 @@ actor Renderer {
     
     var lastCameraPosition: SIMD3<Float>?
     
-    let obj: Model?
     /*
      type Sphere
      let spheres: [Sphere]
@@ -96,43 +100,10 @@ actor Renderer {
     
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
         self.device = layerRenderer.device
-
-        // MARK: load up your meshes
-        /* E.G.
-         let textureLoader = MTKTextureLoader(device: self.device)
-         let sponzaURL = Bundle.main.url(forResource: "Sponza_Scene", withExtension: "usdz")!
-         self.sponzaModel = Model()
-         self.sponzaModel?.scale = simd_float3(repeating: 0.004)
-         self.sponzaModel?.loadModel(device: device, url: sponzaURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
-         */
-        let vertexDescriptor = MTLVertexDescriptor()
-        vertexDescriptor.layouts[30].stride = MemoryLayout<Vertex>.stride
-        vertexDescriptor.layouts[30].stepRate = 1
-        vertexDescriptor.layouts[30].stepFunction = MTLVertexStepFunction.perVertex
-
-        vertexDescriptor.attributes[0].format = MTLVertexFormat.float3
-        vertexDescriptor.attributes[0].offset = MemoryLayout.offset(of: \Vertex.position)!
-        vertexDescriptor.attributes[0].bufferIndex = 30
-
-        vertexDescriptor.attributes[1].format = MTLVertexFormat.float2
-        vertexDescriptor.attributes[1].offset = MemoryLayout.offset(of: \Vertex.texCoord)!
-        vertexDescriptor.attributes[1].bufferIndex = 30
-        
-        vertexDescriptor.attributes[2].format = MTLVertexFormat.float3
-        vertexDescriptor.attributes[2].offset = MemoryLayout.offset(of: \Vertex.normal)!
-        vertexDescriptor.attributes[2].bufferIndex = 30
-        let textureLoader = MTKTextureLoader(device: layerRenderer.device)
-        let cornellURL = Bundle.main.url(forResource: "Cornell_Box_2", withExtension: "usdz")!
-        self.obj = Model()
-        self.obj!.loadModel(device: device, url: cornellURL, vertexDescriptor: vertexDescriptor, textureLoader: textureLoader)
-        let triangles = convertModelToShaderScene(model: self.obj!)
-        print(triangles.count)
-        // MARK: END
-        
-        
         self.layerRenderer = layerRenderer
         self.commandQueue = self.device.makeCommandQueue()!
         self.appModel = appModel
+
         
         let device = self.device
         if device.supports32BitMSAA && device.supportsTextureSampleCount(4) {
@@ -192,11 +163,72 @@ actor Renderer {
         }
     }
     
+    func loadModelAndSetupTriangles() async {
+        // MARK: Set up vertex descriptor for models
+        let vertexDescriptor = MTLVertexDescriptor()
+        vertexDescriptor.layouts[30].stride = MemoryLayout<Vertex>.stride
+        vertexDescriptor.layouts[30].stepRate = 1
+        vertexDescriptor.layouts[30].stepFunction = MTLVertexStepFunction.perVertex
+
+        vertexDescriptor.attributes[0].format = MTLVertexFormat.float3
+        vertexDescriptor.attributes[0].offset = MemoryLayout.offset(of: \Vertex.position)!
+        vertexDescriptor.attributes[0].bufferIndex = 30
+
+        vertexDescriptor.attributes[1].format = MTLVertexFormat.float2
+        vertexDescriptor.attributes[1].offset = MemoryLayout.offset(of: \Vertex.texCoord)!
+        vertexDescriptor.attributes[1].bufferIndex = 30
+        
+        vertexDescriptor.attributes[2].format = MTLVertexFormat.float3
+        vertexDescriptor.attributes[2].offset = MemoryLayout.offset(of: \Vertex.normal)!
+        vertexDescriptor.attributes[2].bufferIndex = 30
+        let textureLoader = MTKTextureLoader(device: layerRenderer.device)
+
+        var gpuTriangles: [GPUTriangle]
+
+        if await self.appModel.selectedModel.useFakeTriangles {
+            gpuTriangles = fakeTriangles.map { GPUTriangle(from: $0) }
+            self.triangleCount = gpuTriangles.count
+        } else {
+            let modelFilename = await self.appModel.selectedModel.filename
+            guard let url = Bundle.main.url(forResource: modelFilename,
+    withExtension: "usdz") else {
+                fatalError("Failed to load model file: \(modelFilename).usdz")
+            }
+
+            let obj = Model()
+            print(1)
+            obj.loadModel(device: device, url: url, vertexDescriptor:
+    vertexDescriptor, textureLoader: textureLoader)
+            print(2)
+            let triangles = convertModelToShaderScene(model: obj)
+            print(3)
+            gpuTriangles = triangles.map { GPUTriangle(from: $0) }
+            self.triangleCount = gpuTriangles.count
+        }
+
+        print("count: \(gpuTriangles.count)")
+        if !gpuTriangles.isEmpty {
+            let triangleBufferSize = (MemoryLayout<GPUTriangle>.stride) *
+    gpuTriangles.count
+            let alignedTriangleBufferSize = (triangleBufferSize + 0xFF) &
+    -0x100
+            self.triangleBuffer = device.makeBuffer(bytes: &gpuTriangles,
+                                                   length:
+    alignedTriangleBufferSize,
+                                                   options:
+    .storageModeShared)
+            self.triangleBuffer?.label = "Model Triangles Buffer"
+        }
+    }
+    // MARK: END
+
+    
     @MainActor
     static func startRenderLoop(_ layerRenderer: LayerRenderer, appModel: AppModel) {
         Task(executorPreference: RendererTaskExecutor.shared) {
             let renderer = Renderer(layerRenderer, appModel: appModel)
             await renderer.startARSession()
+            await renderer.loadModelAndSetupTriangles()
             await renderer.renderLoop()
         }
     }
@@ -311,9 +343,14 @@ actor Renderer {
     // MARK: compute pipeline
     private var accumulationTexture: MTLTexture?
     private var pathTracerOutputTexture: MTLTexture?
+    private var denoisedTexture: MTLTexture?    // New texture for denoised output
     private var sampleCount: UInt32 = 0
+    private var camMovement: Float = 0
     private var lastFrameTime: Double = 0
     private var isMoving: Bool = false
+    
+    // Flag to use enhanced denoiser (more quality but slightly more expensive)
+    private var useEnhancedDenoiser: Bool = true
     
     private func setupComputePipelines() {
         guard let library = device.makeDefaultLibrary() else { return }
@@ -322,7 +359,6 @@ actor Renderer {
         if let function = library.makeFunction(name: "pathTracerCompute") {
             do {
                 let pipeline = try device.makeComputePipelineState(function: function)
-                computePipelines["pathTracerCompute"] = pipeline
                 computePipelines["pathTracerCompute"] = pipeline
             } catch {
                 print("Failed to create compute pipeline for pathTracerCompute: \(error)")
@@ -338,10 +374,30 @@ actor Renderer {
                 print("Failed to create compute pipeline for accumulationKernel: \(error)")
             }
         }
+        
+        // Create basic real-time denoising pipeline
+        if let function = library.makeFunction(name: "fastDenoiseKernel") {
+            do {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                computePipelines["fastDenoiseKernel"] = pipeline
+            } catch {
+                print("Failed to create compute pipeline for fastDenoiseKernel: \(error)")
+            }
+        }
+        
+        // Create enhanced real-time denoising pipeline
+        if let function = library.makeFunction(name: "enhancedDenoiseKernel") {
+            do {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                computePipelines["enhancedDenoiseKernel"] = pipeline
+            } catch {
+                print("Failed to create compute pipeline for enhancedDenoiseKernel: \(error)")
+            }
+        }
     }
     
     private func createComputeOutputTexture(width: Int, height: Int) {
-        // Create three textures with the same descriptor setup
+        // Create textures with the same descriptor setup
         let createTexture = { () -> MTLTexture? in
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .rgba32Float,
@@ -353,10 +409,11 @@ actor Renderer {
             return self.device.makeTexture(descriptor: descriptor)
         }
         
-        // Create textures
-        computeOutputTexture = createTexture()       // Final output texture shown to the user
-        pathTracerOutputTexture = createTexture()    // Single sample from pathTracer
+        // Create textures for each stage of the pipeline
+        pathTracerOutputTexture = createTexture()    // Raw output from pathTracer
         accumulationTexture = createTexture()        // Accumulated results
+        denoisedTexture = createTexture()            // Denoised output
+        computeOutputTexture = createTexture()       // Final output texture shown to the user
         
         // Reset sample count when creating new textures
         resetAccumulation()
@@ -424,16 +481,29 @@ actor Renderer {
         return newTargets
     }
     
-    private func updateGameState(drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) {
+    private func updateGameState(drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) async {
         /// Update any game state before rendering
+
+        // Create rotation matrices from AppModel rotation values
+        // MARK: doing it here does not result in local rotations. adding a translation does not help.
+        let c = Globals.shared.modelCenter
+        let initialization = await matrix4x4_translation(-c.x, -c.y, -c.z)
+        let rotationMatrixX = await matrix4x4_rotation(radians: radians_from_degrees(appModel.rotationX), axis: SIMD3<Float>(1, 0, 0))
+        let rotationMatrixY = await matrix4x4_rotation(radians: radians_from_degrees(appModel.rotationY), axis: SIMD3<Float>(0, 1, 0))
+        let rotationMatrixZ = await matrix4x4_rotation(radians: radians_from_degrees(appModel.rotationZ), axis: SIMD3<Float>(0, 0, 1))
         
-        let rotationAxis = SIMD3<Float>(1, 1, 0)
-        let modelRotationMatrix = matrix4x4_rotation(radians: rotation, axis: rotationAxis)
-//        let modelTranslationMatrix = matrix4x4_translation(0.0, 0.0, -8.0)
-        let modelTranslationMatrix = matrix4x4_translation(0, 0, 0)
+        // Combine all rotation matrices
+        let modelRotationMatrix = rotationMatrixX * rotationMatrixY * rotationMatrixZ
+        
+//        let c = Globals.shared.modelCenter
+//        let modelTranslationMatrix = matrix4x4_translation(c.x, c.y, c.z)
+        let modelTranslationMatrix = matrix4x4_translation(c.x, c.y, c.z)
         let modelScaleMatrix = matrix4x4_scale(-1, 1, 1)
-        //        let modelMatrix = modelTranslationMatrix * modelRotationMatrix
-        let modelMatrix = modelTranslationMatrix * modelScaleMatrix
+        
+        // Apply rotation to the model matrix
+        let modelMatrix = modelTranslationMatrix * modelScaleMatrix * initialization
+        // let model matrix be
+//        let modelMatrix = modelTranslationMatrix
         
         let simdDeviceAnchor = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
         
@@ -449,8 +519,6 @@ actor Renderer {
         if drawable.views.count > 1 {
             self.uniforms[0].uniforms.1 = uniforms(forViewIndex: 1)
         }
-        
-        rotation += 0.01
     }
     
     func renderFrame() async {
@@ -476,7 +544,7 @@ actor Renderer {
             semaphore.signal()
         }
         self.updateDynamicBufferState()
-        self.updateGameState(drawable: drawable, deviceAnchor: deviceAnchor)
+        await self.updateGameState(drawable: drawable, deviceAnchor: deviceAnchor)
         let renderPassDescriptor = MTLRenderPassDescriptor()
         if rasterSampleCount > 1 {
             let renderTargets = memorylessRenderTargets(drawable: drawable)
@@ -552,9 +620,11 @@ actor Renderer {
         func dispatchComputeCommands(commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) async {
             guard let pathTracerPipeline = computePipelines["pathTracerCompute"],
                   let accumulationPipeline = computePipelines["accumulationKernel"],
+                  let denoisePipeline = computePipelines["fastDenoiseKernel"],
                   let outputTexture = computeOutputTexture,
                   let pathTracerOutput = pathTracerOutputTexture,
-                  let accumTexture = accumulationTexture else {
+                  let accumTexture = accumulationTexture,
+                  let denoiseTexture = denoisedTexture else {
                 return
             }
             
@@ -584,14 +654,10 @@ actor Renderer {
             }
             
             // Update last camera position
-            lastCameraPosition = currentCameraPosition
             sampleCount += 1
+            camMovement = length(currentCameraPosition - (lastCameraPosition ?? SIMD3<Float>(0, 0, 0)))
+            lastCameraPosition = currentCameraPosition
             let cameraPosition = viewMatrix.columns.3.xyz
-            let projection = drawable.computeProjection(viewIndex: 0)
-//            let fovY = 2.0 * atan(1.0 / projection.columns.1.y)
-//            let fovX = 2.0 * atan(1.0 / projection.columns.0.x)
-            let fovY = radians_from_degrees(95.0)
-            let fovX = radians_from_degrees(115.0)
             var params = ComputeParams(
                 time: computeTime,
                 resolution: SIMD2<Float>(Float(outputTexture.width), Float(outputTexture.height)),
@@ -600,22 +666,20 @@ actor Renderer {
                 cameraPosition: cameraPosition,
                 viewMatrix: viewMatrix,
                 inverseViewMatrix: viewMatrix.inverse,
-                projectionMatrix: projection,
-                fovY: fovY,
-                fovX: fovX,
-                modelTriangleCount: UInt32(mesh.submeshes.count),
+                modelTriangleCount: UInt32(triangleCount), // Pass the actual triangle count
+                useViewMatrix: await self.appModel.useViewMatrix,
                 lensRadius: await appModel.lensRadius,
                 focalDistance: await appModel.focalDistance,
                 SPH: await appModel.SPH,            // for myopia
                 CYL: await appModel.CYL,             // astigmatism strength
                 AXIS: await appModel.AXIS            // astigmatism angle
-//                lensRadius: 0.05,
-//                focalDistance: 4.0,
-//                SPH: 0.0,            // for myopia
-//                CYL: 0.0,             // astigmatism strength
-//                AXIS: 45.0            // astigmatism angle
-            )
-//            print("hello")
+
+            // if app model just changed, reset acumulation
+            if await appModel.dofJustChanged {
+                resetAccumulation()
+                await appModel.changeDOF()
+            }
+            
             // if app model just changed, reset acumulation
             if await appModel.dofJustChanged {
                 resetAccumulation()
@@ -635,6 +699,10 @@ actor Renderer {
             guard let pathTracerEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
             pathTracerEncoder.setComputePipelineState(pathTracerPipeline)
             pathTracerEncoder.setBytes(&params, length: MemoryLayout<ComputeParams>.size, index: 0)
+            if let triangleBuffer = triangleBuffer {
+                pathTracerEncoder.setBuffer(triangleBuffer, offset: 0, index: 1)
+            }
+            
             pathTracerEncoder.setTexture(pathTracerOutput, index: 0)
             pathTracerEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
             pathTracerEncoder.endEncoding()
@@ -645,17 +713,30 @@ actor Renderer {
             accumEncoder.setBytes(&sampleCount, length: MemoryLayout<UInt32>.size, index: 0)
             accumEncoder.setTexture(pathTracerOutput, index: 0)
             accumEncoder.setTexture(accumTexture, index: 1)
-            accumEncoder.setTexture(outputTexture, index: 2)
+            accumEncoder.setTexture(denoiseTexture, index: 2) // Now write to denoise texture instead of final output
             accumEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
             accumEncoder.endEncoding()
             
-            // accumulated result for next frame
+            // PASS 3: Denoising Pass - apply real-time denoising to the accumulated result
+            guard let denoiseEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+            if useEnhancedDenoiser, let enhancedPipeline = computePipelines["enhancedDenoiseKernel"] {
+                denoiseEncoder.setComputePipelineState(enhancedPipeline)
+            } else {
+                denoiseEncoder.setComputePipelineState(denoisePipeline)
+            }
+            denoiseEncoder.setBytes(&sampleCount, length: MemoryLayout<UInt32>.size, index: 0)
+            denoiseEncoder.setTexture(denoiseTexture, index: 0) // Input is the accumulated result
+            denoiseEncoder.setTexture(outputTexture, index: 1)  // Output is the final displayed texture
+            denoiseEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadsPerThreadgroup)
+            denoiseEncoder.endEncoding()
+                        
+            // Copy accumulated result for next frame
             guard let copyEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
-            copyEncoder.copy(from: outputTexture, to: accumTexture)
+            copyEncoder.copy(from: denoiseTexture, to: accumTexture)
             copyEncoder.endEncoding()
             
-//            print("Rendering sample \(sampleCount)")
         }
+        // MARK: END
         
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
@@ -666,15 +747,15 @@ actor Renderer {
     }
     
     // Method to set up and initialize compute components
-    private func setupComputeComponents() {
+    private func setupComputeComponents() async {
         setupComputePipelines()
-        let resolution = 1440
+        let resolution = await self.appModel.selectedResolution.rawValue
         createComputeOutputTexture(width: resolution, height: resolution)
     }
     
     func renderLoop() async {
         // Set up compute components at the start of the render loop
-        setupComputeComponents()
+        await setupComputeComponents()
         
         while true {
             if layerRenderer.state == .invalidated {

@@ -16,20 +16,11 @@ using namespace metal;
 #define SHADOW_BIAS 0.001f
 #define SUPER_FAR 1000000.0
 
-// Scene constants
+// Scene constants - still needed for hardcoded elements
 #define NUM_SPHERES 1
 #define NUM_QUADS 15
 #define NUM_LIGHTS 3
 
-// Halton sequence primes for better sampling
-constant unsigned int primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
-
-// Material properties
-enum MaterialType {
-    DIFFUSE = 0,
-    METAL = 1,
-    DIELECTRIC = 2
-};
 
 typedef struct RayHit {
     bool hit = false;
@@ -68,8 +59,12 @@ typedef struct {
     Sphere spheres[NUM_SPHERES];
     Quad quads[NUM_QUADS];
     Triangle lights[NUM_LIGHTS];
+    // The model triangles will be passed separately via a buffer
 } Scene;
 
+// MARK: RNG functions
+// Halton sequence primes for better sampling
+constant unsigned int primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
 // RNG functions
 float rand(thread uint2& seed) {
     seed = 1103515245 * ((seed.x >> 1) ^ seed.y);
@@ -139,8 +134,9 @@ float3 RandomCosineDirection(thread uint& state, float3 normal) {
     // Transform to world space
     return tangent * randomLocal.x + bitangent * randomLocal.y + normal * randomLocal.z;
 }
+// MARK: END RANDOM FUNCTIONS
 
-// Ray intersection functions
+//  MARK: Ray TRACING functions
 RayHit raySphereIntersect(float3 rayOrigin, float3 rayDirection, Sphere sphere) {
     RayHit hit;
     hit.hit = false;
@@ -251,16 +247,27 @@ RayHit rayQuadIntersect(float3 rayOrigin, float3 rayDirection, Quad quad) {
     return noHit;
 }
 
+// Convert GPUTriangle to a Triangle for internal use
+Triangle convertGPUTriangle(GPUTriangle gpuTriangle) {
+    Triangle tri;
+    tri.p1 = gpuTriangle.p1;
+    tri.p2 = gpuTriangle.p2;
+    tri.p3 = gpuTriangle.p3;
+    tri.color = gpuTriangle.color;
+    tri.isLightSource = gpuTriangle.isLightSource;
+    tri.intensity = gpuTriangle.intensity;
+    return tri;
+}
+
 // Find the closest hit in the scene
-RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene) {
+RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene, 
+                   constant GPUTriangle* modelTriangles, uint modelTriangleCount) {
     RayHit closestHit;
     closestHit.hit = false;
     closestHit.dist = SUPER_FAR;
     
-    // Check intersections with all spheres
     for (int i = 0; i < NUM_SPHERES; i++) {
         Sphere sphere = scene.spheres[i];
-        // Skip empty spheres (those with radius 0)
         if (sphere.r <= 0.0) continue;
         
         RayHit hit = raySphereIntersect(rayPosition, rayDirection, sphere);
@@ -269,10 +276,8 @@ RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene) {
         }
     }
     
-    // Check intersections with all quads
     for (int i = 0; i < NUM_QUADS; i++) {
         Quad quad = scene.quads[i];
-        // Skip invalid quads (simple check - if all points are at origin)
         if (length(quad.p0) + length(quad.p1) + length(quad.p2) + length(quad.p3) <= 0.0) continue;
         
         RayHit hit = rayQuadIntersect(rayPosition, rayDirection, quad);
@@ -281,10 +286,8 @@ RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene) {
         }
     }
     
-    // Check intersections with all lights
     for (int i = 0; i < NUM_LIGHTS; i++) {
         Triangle triangle = scene.lights[i];
-        // Skip invalid triangles
         if (length(triangle.p1) + length(triangle.p2) + length(triangle.p3) <= 0.0) continue;
         
         RayHit hit = rayTriangleIntersect(rayPosition, rayDirection, triangle);
@@ -293,24 +296,46 @@ RayHit rayTraceHit(float3 rayPosition, float3 rayDirection, Scene scene) {
         }
     }
     
+    for (uint i = 0; i < modelTriangleCount; i++) {
+        GPUTriangle gpuTriangle = modelTriangles[i];
+        if (length(gpuTriangle.p1) + length(gpuTriangle.p2) + length(gpuTriangle.p3) <= 0.0) continue;
+        Triangle triangle;
+        triangle.p1 = gpuTriangle.p1;
+        triangle.p2 = gpuTriangle.p2;
+        triangle.p3 = gpuTriangle.p3;
+        triangle.color = gpuTriangle.color;
+        triangle.isLightSource = gpuTriangle.isLightSource;
+        triangle.intensity = gpuTriangle.intensity;
+        
+        RayHit hit = rayTriangleIntersect(rayPosition, rayDirection, triangle);
+        // If we hit, set properties based on GPU triangle
+        if (hit.hit && hit.dist < closestHit.dist && hit.dist > 0) {
+            // Update material properties based on model data
+            hit.material = (MaterialType)gpuTriangle.materialType;
+            hit.roughness = gpuTriangle.roughness;
+            closestHit = hit;
+        }
+    }
+    
     return closestHit;
 }
 
 // Shadow test - returns true if point is in shadow
-bool isInShadow(float3 point, float3 lightDir, float lightDistance, Scene scene) {
+bool isInShadow(float3 point, float3 lightDir, float lightDistance, Scene scene, 
+               constant GPUTriangle* modelTriangles, uint modelTriangleCount) {
     // Add bias to avoid self-intersection
     float3 shadowRayOrigin = point + lightDir * SHADOW_BIAS;
-    
     // Simple shadow check against all objects
-    RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene);
+    RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene, modelTriangles, modelTriangleCount);
     // hit.emission trick so if its a light it should output false
     return (length(hit.emission) <= 0) * hit.hit;
 }
     
 // do it like this so no control flow needed.
-float shadowFactor(float3 point, float3 lightDir, float lightDistance, Scene scene) {
+float shadowFactor(float3 point, float3 lightDir, float lightDistance, Scene scene, 
+                  constant GPUTriangle* modelTriangles, uint modelTriangleCount) {
     float3 shadowRayOrigin = point + lightDir * SHADOW_BIAS;
-    RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene);
+    RayHit hit = rayTraceHit(shadowRayOrigin, lightDir, scene, modelTriangles, modelTriangleCount);
     // Return 0.0 when in shadow, 1.0 when not in shadow
     return 1.0 - float(hit.hit && length(hit.emission) <= 0);
 }
@@ -369,7 +394,9 @@ float3 sampleDirection(float3 inDir, float3 normal, MaterialType materialType,
 }
 
 // The main path tracing function
-float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint& rng, uint frameIndex) {
+float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, 
+                constant GPUTriangle* modelTriangles, uint modelTriangleCount,
+                thread uint& rng, uint frameIndex) {
     float3 finalColor = float3(0.0);
     float3 throughput = float3(1.0);
     float3 rayPos = rayOrigin;
@@ -377,7 +404,7 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
     
     // Loop for multiple bounces
     for (int bounce = 0; bounce <= MAX_BOUNCES; ++bounce) {
-        RayHit hit = rayTraceHit(rayPos, rayDir, scene);
+        RayHit hit = rayTraceHit(rayPos, rayDir, scene, modelTriangles, modelTriangleCount);
         // If no hit, add background contribution and break
         if (!hit.hit || hit.dist >= SUPER_FAR) {
             break;
@@ -402,7 +429,7 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
                 float3 lightPos = sampleLightSource(light, rng);
                 float3 lightDir = normalize(lightPos - hitPoint);
                 float lightDistance = length(lightPos - hitPoint);
-                float shadow = shadowFactor(hitPoint, lightDir, lightDistance, scene);
+                float shadow = shadowFactor(hitPoint, lightDir, lightDistance, scene, modelTriangles, modelTriangleCount);
                 float3 brdf = evaluateBRDF(-rayDir, lightDir, hit.normal, hit.albedo,
                                            hit.material, hit.roughness);
                 float cos_theta = abs(dot(hit.normal, lightDir));
@@ -425,121 +452,117 @@ float3 pathTrace(float3 rayOrigin, float3 rayDirection, Scene scene, thread uint
             if (RandomFloat01(rng) > p) {
                 break;
             }
-            throughput /= p; // basically how much in the next ray shot it will contribute.
+            throughput /= p;
         }
     }
      
     return finalColor;
 }
+// MARK: END HELPER FUNCTIONS
 
 // Standard compute shader path tracing implementation (original)
 kernel void pathTracerCompute(texture2d<float, access::write> output [[texture(0)]],
                              constant ComputeParams &params [[buffer(0)]],
-                              uint2 gid [[thread_position_in_grid]]) {
-    // Get dimensions
+                             constant GPUTriangle* modelTriangles [[buffer(1)]],
+                             uint2 gid [[thread_position_in_grid]]) {    
+
     uint width = output.get_width();
     uint height = output.get_height();
-    
+    // Skip if out of bounds
     if (gid.x >= width || gid.y >= height) {
         return;
     }
-    
     uint frameIndex = params.frameIndex;
-    uint sampleCount = params.sampleCount;
-    float2 resolution = params.resolution;
-    
-//    if (abs(params.lensRadius - 0.1) < 0.0001) output.write(float4(1,0,0,1), gid); else output.write(float4(1), gid); 
-//    return;
-    
-    // Scene setup: Cornell box
+    uint modelTriangleCount = params.modelTriangleCount;
+
+    // === now we'll rely on model triangles passed from Swift but in case there are none here is a default
     Scene scene = {
-        .quads = {
-            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, 2, -8), float3(-2, 2, -8), half3(0.5, 0.5, 0.8), DIELECTRIC, 0.0 },  // Back wall
-            { float3(-2, -2, -8), float3(-2, 2, -8), float3(-2, 2, -3), float3(-2, -2, -3), half3(0.8, 0.2, 0.2), DIELECTRIC, 0.0 },  // Left wall
-            { float3(2, -2, -8), float3(2, -2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.2, 0.8, 0.2), DIELECTRIC, 0.0 },  // Right wall
-            { float3(-2, -2, -8), float3(2, -2, -8), float3(2, -2, -3), float3(-2, -2, -3), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Floor
-            { float3(-2, 2, -8), float3(-2, 2, -3), float3(2, 2, -3), float3(2, 2, -8), half3(0.7, 0.7, 0.7), METAL, 0.0 },  // Ceiling
-            
-            // Tall metallic box
-            { float3(-1.0, -2.0, -6.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
-            { float3(-1.0, -2.0, -7.5), float3(-1.0, -2.0, -6.5), float3(-1.0, 0.3, -6.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
-            { float3(-0.2, -2.0, -7.5), float3(-0.2, -2.0, -6.5), float3(-0.2, 0.3, -6.5), float3(-0.2, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
-            { float3(-1.0, -2.0, -7.5), float3(-0.2, -2.0, -7.5), float3(-0.2, 0.3, -7.5), float3(-1.0, 0.3, -7.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
-            { float3(-1.0, 0.3, -7.5), float3(-0.2, 0.3, -7.5), float3(-0.2, 0.3, -6.5), float3(-1.0, 0.3, -6.5), half3(0.9, 0.7, 0.3), DIELECTRIC, 0.1 },
-            
-            // Short glass box
-            { float3(0.2, -2.0, -6.5), float3(0.2, -2.0, -5.5), float3(0.2, -1.0, -5.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },
-            { float3(1.0, -2.0, -6.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(1.0, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },
-            { float3(0.2, -2.0, -6.5), float3(1.0, -2.0, -6.5), float3(1.0, -1.0, -6.5), float3(0.2, -1.0, -6.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 },
-            { float3(0.2, -1.0, -6.5), float3(1.0, -1.0, -6.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIFFUSE, 0.0 },
-            { float3(0.2, -2.0, -5.5), float3(1.0, -2.0, -5.5), float3(1.0, -1.0, -5.5), float3(0.2, -1.0, -5.5), half3(0.9, 0.9, 0.9), DIELECTRIC, 0.0 }
-        },
         .lights = {
-            { float3(1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
-            { float3(-1, 1.9, -5), float3(-1, 1.9, -6.5), float3(1, 1.9, -6.5), half3(1, 1, 1), true, 100.0 },
             { float3(-1, 1.9, -2), float3(-1, 1.9, -4.5), float3(1, 1.9, -4.5), half3(1, 1, 1), true, 100.0 }
         }
     };
-   
-    // === Halton jitter for anti-aliasing
+    uint j = 0;
+    for (uint i = 0; i < modelTriangleCount; i++) {
+        GPUTriangle gpuTriangle = modelTriangles[i];
+        if (gpuTriangle.isLightSource) {
+            scene.lights[j++] = convertGPUTriangle(gpuTriangle);
+        }
+    }
+
+    // ==== add some jitter to UV. This is also done in WWDC example
+    float2 uv = float2(gid) / float2(width, height);
+    // Initialize RNG seed - add spatial and temporal variation
+    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + params.time * 10000) | 1;
+    // Add jitter for anti-aliasing - use halton sequence for better distribution
     float2 jitter = float2(
                            halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 0) - 0.5,
                            halton((frameIndex * width * height + gid.y * width + gid.x) % 1000, 1) - 0.5
                            ) / float2(width, height);
-    
+    // === initialize ray direction
+//    float3 rayPosition = params.cameraPosition;
+    float3 rayPosition = float3(0); // since we don't really move that much anyway. this makes it more stable.
     float2 uv = (float2(gid) + float2(0.5) + jitter) / float2(width, height);
     if (uv.x <= 0.01 || uv.y <= 0.01) {
         output.write(float4(1,0,0,1), gid);
         return;
     }
 
-    float3 rayPosition = params.cameraPosition;
+//     float3 rayPosition = params.cameraPosition;
     float theta = (uv.x) * 2.0 * M_PI_F; // longitude: 0 to 2π
     float phi = (uv.y) * M_PI_F;   // latitude: 0 to π
     float3 rayDirection;
     rayDirection.x = sin(phi) * cos(theta);
     rayDirection.y = cos(phi);
     rayDirection.z = sin(phi) * sin(theta);
-
-//     Convert to camera space
-    float3 camRayOrigin = (params.viewMatrix * float4(rayPosition, 1.0)).xyz;
-    float3 camRayDirection = normalize((params.viewMatrix * float4(rayDirection, 0.0)).xyz);
     
-    float3 pSensorCam = camRayOrigin + 1 * camRayDirection;
+    /// visualize rayDirection
+    //output.write(float4(rayDirection, 1.0), gid);
+    //return;
     
-    // === Sample lens point
-    float rndR = halton(frameIndex, 2);
-    float rndTheta = halton(frameIndex, 3) * 2.0f * M_PI_F;
+    // MARK: SIMULATE ABERRATIONS HERE
+        float3 abberatedRayOrigin = (float4(rayPosition, 1.0)).xyz;
+        float3 abberatedRayDirection = normalize((float4(rayDirection, 0.0)).xyz);
+        
+        float3 pSensorCam = abberatedRayOrigin + 1 * abberatedRayDirection;
+        
+        // === Sample lens point
+        float rndR = halton(frameIndex, 2); // [0,1]
+        float rndTheta = halton(frameIndex, 3) * 2.0f * M_PI_F; // [0,2π]
+        
+        float lensX = params.lensRadius * sqrt(rndR) * cos(rndTheta);
+        float lensY = params.lensRadius * sqrt(rndR) * sin(rndTheta);
+        float3 lensPos = float3(lensX, lensY, 0.0);
+        
+        // === Astigmatism: modulate focus per meridian
+        float axisRad = params.AXIS * M_PI_F / 180.0;
+        /*ARNOLD CODE:
+         double eyePower = data->sph + data->cyl * pow(sin(phi + data->axis * AI_DTOR), 2);
+         double f = data->focalDistance + 1 / (eyePower);
+         */
+        float eyePower = params.SPH + params.CYL * pow(sin(rndTheta + axisRad), 2);
+        float adjustedFocalDist = params.focalDistance + 1.0 / eyePower;
+        
+        // === Compute focal point
+        float3 focusPos = pSensorCam * adjustedFocalDist;
+        
+        // === Compute ray direction
+        float3 lensPosWorld = (float4(lensPos, 1.0)).xyz;
+        float3 focusPosWorld = (float4(focusPos, 1.0)).xyz;
+        
+        rayPosition = lensPosWorld;
+        rayDirection = normalize(focusPosWorld - lensPosWorld);
+    // MARK: END ======
     
-    float lensX = params.lensRadius * sqrt(rndR) * cos(rndTheta);
-    float lensY = params.lensRadius * sqrt(rndR) * sin(rndTheta);
-    float3 lensPosCam = float3(lensX, lensY, 0.0);
+    // Use math to conditionally apply view matrix transformation
+    // When params.useViewMatrix is true, use transformed direction
+    // When params.useViewMatrix is false, use original direction
+    float3 transformedDir = (params.viewMatrix * float4(rayDirection, 0)).xyz;
+    rayDirection = mix(rayDirection, transformedDir, float(params.useViewMatrix));
     
-    // === Astigmatism: modulate focus per meridian
-    float axisRad = params.AXIS * M_PI_F / 180.0;
-    float t = fmod(rndTheta + axisRad, M_PI_F);
-    float phase = (t < M_PI_F / 2.0) ? (t / (M_PI_F / 2.0)) : ((M_PI_F - t) / (M_PI_F / 2.0));
-    float eyePower = params.SPH + params.CYL * phase;
-    // float adjustedFocalDist = params.focalDistance + 1.0 / eyePower;
-    float adjustedFocalDist = 1 / (1 / params.focalDistance + eyePower);
-    
-    // === Compute focal point in camera space and transform
-    float3 focusPosCam = pSensorCam * adjustedFocalDist;
-    
-    // === Convert camera space to world space
-    float3 lensPosWorld = (params.inverseViewMatrix * float4(lensPosCam, 1.0)).xyz;
-    float3 focusPosWorld = (params.inverseViewMatrix * float4(focusPosCam, 1.0)).xyz;
-    
-    float3 rayOrigin = lensPosWorld;
-    float3 rayDir = normalize(focusPosWorld - lensPosWorld);
-    
-    // === Path tracing
-    uint rngState = uint(gid.x * 1973 + gid.y * 9277 + frameIndex * 26699) | 1;
-    float3 color = pathTrace(rayOrigin, rayDir, scene, rngState, frameIndex);
-    
-    // === Gamma correction and write
-    color = pow(color, float3(1.0 / 2.2));
-    if (length(color) > 0.0001) {
+    // Trace path with model triangles
+    float3 color = pathTrace(rayPosition, rayDirection, scene, modelTriangles, modelTriangleCount, rngState, frameIndex);
+    // Apply gamma correction for display
+    color = pow(color, float3(1.0/2.2));
+    if (length(color - float3(0)) > 0.01)
         output.write(float4(color, 1.0), gid);
-    }
 }

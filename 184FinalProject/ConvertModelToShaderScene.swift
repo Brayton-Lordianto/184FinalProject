@@ -27,39 +27,85 @@ struct Triangle {
     var roughness: Float
 }
 
-func convertModelToShaderScene(model: Model) -> [Triangle] {
-    var triangles = [Triangle]()
+struct GPUTriangleAligned {
+    var p1: SIMD3<Float>
+    var _padding: SIMD3<Float>
+    var p2: SIMD3<Float>
+    var _padding2: SIMD2<Float>
+    var p3: SIMD3<Float>
+    var _padding3: Float
+    var color: simd_half3
+    var _padding4: Float
+    var isLightSource: Bool
+    var intensity: Float
+    var materialType: Int32
+    var roughness: Float
+}
+
+struct GPUTriangle {
+    var p1: SIMD3<Float>
+    var p2: SIMD3<Float>
+    var p3: SIMD3<Float>
+    var color: simd_half3
+    var isLightSource: Bool
+    var intensity: Float
+    var materialType: Int32
+    var roughness: Float
     
-    // Apply model transformation
+    init(from triangle: Triangle) {
+        self.p1 = triangle.p1
+        self.p2 = triangle.p2
+        self.p3 = triangle.p3
+        self.color = triangle.color
+        self.isLightSource = triangle.isLightSource
+        self.intensity = triangle.intensity
+        self.materialType = Int32(triangle.material.rawValue)
+        self.roughness = triangle.roughness
+        
+        print("created triangle with parameters \(triangle.p1), \(triangle.p2), \(triangle.p3), \(triangle.color), \(triangle.isLightSource), \(triangle.intensity), \(triangle.material.rawValue), \(triangle.roughness)")
+    }
+}
+
+func additionalVertexPositionProcessing(_ position: SIMD3<Float>) -> SIMD3<Float> {
+    // Apply additional processing to the vertex position if needed
+    // Add z offset so it fits in front of the camera
+    var p = position + SIMD3<Float>(0, 0, -5)
+    return p
+}
+
+func convertModelToShaderScene(model: Model) -> [Triangle] {
+    // MARK: CORRECTION FROM PARSING ISSUE
+    if Globals.shared.name == AppModel.ModelType.originalCornellBox.filename {
+        model.rotation = SIMD3<Float>(-90, 0, 0)
+    }
+//     later make the custom cornell box really big and enclosing you.
+    if Globals.shared.name != AppModel.ModelType.customCornellBox.filename {
+        model.position += Globals.shared.modelCenter
+    }
+    let rotationFromUser = -1 * SIMD3<Float>(Globals.shared.rotationX, Globals.shared.rotationY, Globals.shared.rotationZ)
+    
+    var triangles = [Triangle]()
     var modelMatrix = matrix_identity_float4x4
-    translateMatrix(matrix: &modelMatrix, position: model.position)
+    rotateMatrix(matrix: &modelMatrix, rotation: toRadians(from: rotationFromUser))
     rotateMatrix(matrix: &modelMatrix, rotation: toRadians(from: model.rotation))
     scaleMatrix(matrix: &modelMatrix, scale: model.scale)
+    translateMatrix(matrix: &modelMatrix, position: model.position)
     
-    for mesh in model.meshes {
-        // Note: Using buffer index 30 as specified in your vertex descriptor
+    
+    for (meshIndex, mesh) in model.meshes.enumerated() {
+        // Note: Using buffer index 30 as specified in vertex descriptor
         if mesh.mesh.vertexBuffers.count <= 0 {
-            print("No vertex buffers found")
+            print("⚠️ No vertex buffers found for mesh #\(meshIndex)")
             continue
         }
-        
         let vertexBuffer = mesh.mesh.vertexBuffers[0]
-        
         // This is critical - the stride is the size of your Vertex struct
         let vertexStride = MemoryLayout<Vertex>.stride
-        
         // Get raw vertex data
         let vertexData = vertexBuffer.buffer.contents()
         
         for (submeshIndex, submesh) in mesh.mesh.submeshes.enumerated() {
-            // Get material
             let material = mesh.materials[submeshIndex]
-            print("material is \(material)")
-            
-            // Extract color from material - simplistic approach
-            let color = simd_half3(0.7, 0.7, 0.7) // Default color
-            
-            // Get index buffer data
             let indexData = submesh.indexBuffer.buffer.contents()
             
             // Process triangles
@@ -85,27 +131,19 @@ func convertModelToShaderScene(model: Model) -> [Triangle] {
                     let vertex = vertexPtr.bindMemory(to: Vertex.self, capacity: 1).pointee
                     let position = vertex.position
                     let transformedPosition = applyTransform(position, modelMatrix: modelMatrix)
-//                    vertices[j] = transformedPosition
-                    // MARK: add z back transform so it fits in front of you
-                    vertices[j] = transformedPosition + SIMD3<Float>(0, 0, -5)
+                    vertices[j] = additionalVertexPositionProcessing(transformedPosition)
                 }
                 
-                // Create triangle
                 let triangle = Triangle(
                     p1: vertices[0],
                     p2: vertices[1],
                     p3: vertices[2],
-                    color: color,
-                    isLightSource: false,
-                    intensity: 0.0,
-                    material: .diffuse,
-                    roughness: 0.5
+                    color: material.color,
+                    isLightSource: material.isLightSource,
+                    intensity: material.intensity,
+                    material: MaterialType(rawValue: material.materialType) ?? .dielectric,
+                    roughness: material.roughness
                 )
-                
-                // print triangle positions
-                print("Triangle vertices: \(triangle.p1), \(triangle.p2), \(triangle.p3)")
-                // print colors
-                print("Triangle color: \(triangle.color)")
                 
                 triangles.append(triangle)
             }
